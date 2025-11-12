@@ -1,0 +1,25 @@
+{
+	"FileVersion": 3,
+	"Version": 1,
+	"VersionName": "1.0.0",
+	"FriendlyName": "EditorTools",
+	"Description": "EditorTools numbers",
+	"Category": "Gameplay",
+	"CreatedBy": "EditorTools",
+	"CreatedByURL": "",
+	"SupportURL": "",
+	"EngineVersion": "5.5.0",
+	"DocsURL": "",
+	"MarketplaceURL": "",
+	"CanContainContent": true,
+	"IsBetaVersion": false,
+	"IsExperimentalVersion": false,
+	"Installed": false,
+	"Modules": [
+		{
+			"Name": "EditorTools",
+			"Type": "Editor",
+			"LoadingPhase": "Default"
+		}
+	]
+}
