@@ -16,6 +16,7 @@
 #include "Types/DrawCallTypes.h"
 #include "Types/LightInfoTypes.h"
 #include "Types/UnusedAssetTypes.h"
+#include "Types/TextureSizeTypes.h"
 
 #include "EditorToolsBPFLibrary.generated.h"
 
@@ -111,15 +112,27 @@ public:
 	// ==================== 未使用资源检查功能 ====================
 	
 	//检查指定文件夹内未使用的模型（静态网格体和骨骼网格体）
+	//如果FolderPaths为空，则从内容浏览器获取选中的文件夹
 	UFUNCTION(BlueprintCallable, Category = "Editor Tools BP Library|Unused Assets")
-	static TArray<FUnusedAssetInfo> FindUnusedMeshesInFolder(const FString& FolderPath);
+	static TArray<FUnusedAssetInfo> FindUnusedMeshesInFolder(const TArray<FString>& FolderPaths);
 	
 	//检查指定文件夹内未使用的材质
+	//如果FolderPaths为空，则从内容浏览器获取选中的文件夹
 	UFUNCTION(BlueprintCallable, Category = "Editor Tools BP Library|Unused Assets")
-	static TArray<FUnusedAssetInfo> FindUnusedMaterialsInFolder(const FString& FolderPath);
+	static TArray<FUnusedAssetInfo> FindUnusedMaterialsInFolder(const TArray<FString>& FolderPaths);
 	
 	//检查指定文件夹内未使用的贴图
+	//如果FolderPaths为空，则从内容浏览器获取选中的文件夹
 	UFUNCTION(BlueprintCallable, Category = "Editor Tools BP Library|Unused Assets")
-	static TArray<FUnusedAssetInfo> FindUnusedTexturesInFolder(const FString& FolderPath);
+	static TArray<FUnusedAssetInfo> FindUnusedTexturesInFolder(const TArray<FString>& FolderPaths);
+
+	// ==================== 贴图大小检查功能 ====================
+	
+	//检查指定文件夹内使用的贴图大小（根据分辨率从大到小排序，大于1024的用黄色感叹号标注）
+	//如果FolderPaths为空，则从内容浏览器获取选中的文件夹
+	UFUNCTION(BlueprintCallable, Category = "Editor Tools BP Library|Texture Size")
+	static TArray<FTextureSizeInfo> CheckTextureSizesInFolders(const TArray<FString>& FolderPaths);
+
+	
 	
 };

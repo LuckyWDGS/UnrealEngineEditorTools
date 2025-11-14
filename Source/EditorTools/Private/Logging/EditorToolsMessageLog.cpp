@@ -11,6 +11,7 @@
 #include "Logging/EditorToolsLog.h"
 #include "Misc/UObjectToken.h"
 #include "Logging/TokenizedMessage.h"
+#include "Logging/AssetObjectToken.h"
 #include "UObject/SoftObjectPath.h"
 #include "GameFramework/Actor.h"
 #include "Editor.h"
@@ -36,7 +37,7 @@ void FEditorToolsMessageLog::Initialize()
 
 void FEditorToolsMessageLog::ShowUnusedAssetsReport(
 	const FString& AssetType,
-	const FString& FolderPath,
+	const TArray<FString>& FolderPaths,
 	const TArray<FUnusedAssetInfo>& UnusedAssets,
 	int32 TotalCount)
 {
@@ -68,10 +69,20 @@ void FEditorToolsMessageLog::ShowUnusedAssetsReport(
 	);
 
 	// 添加文件夹路径信息
+	FString FolderPathsText;
+	if (FolderPaths.Num() == 1)
+	{
+		FolderPathsText = FolderPaths[0];
+	}
+	else
+	{
+		FolderPathsText = FString::Printf(TEXT("%d个文件夹"), FolderPaths.Num());
+	}
+
 	MessageLogListing->AddMessage(
 		FTokenizedMessage::Create(
 			EMessageSeverity::Info,
-			FText::Format(LOCTEXT("FolderPath", "文件夹路径: {0}"), FText::FromString(FolderPath))
+			FText::Format(LOCTEXT("FolderPath", "文件夹路径: {0}"), FText::FromString(FolderPathsText))
 		)
 	);
 
@@ -89,10 +100,18 @@ void FEditorToolsMessageLog::ShowUnusedAssetsReport(
 	// 添加未使用资产列表
 	if (UnusedAssets.Num() > 0)
 	{
+		// 计算对齐信息
+		const int32 RankWidth = FString::FromInt(UnusedAssets.Num()).Len();
+		int32 MaxNameLen = 0;
+		for (const FUnusedAssetInfo& InfoForWidth : UnusedAssets)
+		{
+			MaxNameLen = FMath::Max(MaxNameLen, InfoForWidth.AssetName.Len());
+		}
+
 		MessageLogListing->AddMessage(
 			FTokenizedMessage::Create(
 				EMessageSeverity::Warning,
-				LOCTEXT("UnusedAssetsListHeader", "未使用的资产列表:")
+				LOCTEXT("UnusedAssetsListHeader", "详细资产列表（点击名称可在内容浏览器中定位）：")
 			)
 		);
 
@@ -119,29 +138,63 @@ void FEditorToolsMessageLog::ShowUnusedAssetsReport(
 			// 尝试加载资产对象
 			UObject* AssetObject = LoadObject<UObject>(nullptr, *ObjectPath);
 			
-			// 创建可点击的消息
+			// 创建可点击的消息（格式：序号 + 类型）
+			FString RankStr = FString::FromInt(i + 1);
+			// 单个数字时 # 和数字之间有空格，多个数字时没有空格
+			// 对于单个数字，先添加空格，然后进行左填充；对于多个数字，直接左填充
+			if ((i + 1) < 10)
+			{
+				RankStr = FString::Printf(TEXT(" %s"), *RankStr);
+			}
+			RankStr = RankStr.LeftPad(RankWidth);
 			TSharedRef<FTokenizedMessage> Message = FTokenizedMessage::Create(
 				EMessageSeverity::Warning,
-				FText::Format(LOCTEXT("UnusedAssetItem", "  {0}. "), i + 1)
+				FText::FromString(FString::Printf(TEXT("#%s. [%s] "), *RankStr, *AssetType))
 			);
 
-			// 添加可点击的资产链接（使用 UObjectToken）
+			// 添加可点击的资产链接（名称左对齐，右填充到最大宽度）
+			FString PaddedName = Info.AssetName;
+			if (PaddedName.Len() < MaxNameLen)
+			{
+				PaddedName += FString::ChrN(MaxNameLen - PaddedName.Len(), TEXT(' '));
+			}
 			if (AssetObject)
 			{
-				Message->AddToken(FUObjectToken::Create(AssetObject, FText::FromString(Info.AssetName)));
+				// 手动添加放大镜图标以保持与 GetHighPolyActorsInScene 的一致性
+				// 使用自定义的 FAssetObjectToken，不自动显示放大镜图标
+				Message->AddToken(FImageToken::Create(TEXT("Icons.Search")));
+				Message->AddToken(FAssetObjectToken::Create(AssetObject, FText::FromString(PaddedName)));
 			}
 			else
 			{
-				// 如果无法加载资产，使用文本显示
-				Message->AddToken(FTextToken::Create(FText::FromString(Info.AssetName)));
+				// 如果无法加载资产，使用文本显示，需要手动添加放大镜图标
+				Message->AddToken(FImageToken::Create(TEXT("Icons.Search")));
+				Message->AddToken(FTextToken::Create(FText::FromString(PaddedName)));
 			}
+			
+			// 添加路径信息
 			Message->AddToken(FTextToken::Create(FText::Format(LOCTEXT("AssetPath", " ({0})"), FText::FromString(FullAssetPath))));
 
 			MessageLogListing->AddMessage(Message);
 		}
 	}
+	
+	// 计算分隔线长度（与列表对齐）
 	int32 SeparatorLen = 80;
-	FString FooterSeparator = FString::ChrN(SeparatorLen, TEXT('-'));
+	FString FooterSeparator;
+	if (UnusedAssets.Num() > 0)
+	{
+		// 如果有未使用的资产，根据列表宽度计算分隔线长度
+		const int32 RankWidth = FString::FromInt(UnusedAssets.Num()).Len();
+		int32 MaxNameLen = 0;
+		for (const FUnusedAssetInfo& InfoForWidth : UnusedAssets)
+		{
+			MaxNameLen = FMath::Max(MaxNameLen, InfoForWidth.AssetName.Len());
+		}
+		SeparatorLen = FMath::Clamp(RankWidth + MaxNameLen + 50, 60, 120);
+	}
+	FooterSeparator = FString::ChrN(SeparatorLen, TEXT('-'));
+	
 	// 添加结束分隔线
 	MessageLogListing->AddMessage(
 		FTokenizedMessage::Create(

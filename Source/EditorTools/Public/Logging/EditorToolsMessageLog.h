@@ -19,13 +19,13 @@ public:
 	/**
 	 * 显示未使用资产的检查结果
 	 * @param AssetType 资产类型（如"模型"、"材质"、"贴图"）
-	 * @param FolderPath 检查的文件夹路径
+	 * @param FolderPaths 检查的文件夹路径（可多个）
 	 * @param UnusedAssets 未使用的资产列表
 	 * @param TotalCount 总资产数量
 	 */
 	static void ShowUnusedAssetsReport(
 		const FString& AssetType,
-		const FString& FolderPath,
+		const TArray<FString>& FolderPaths,
 		const TArray<FUnusedAssetInfo>& UnusedAssets,
 		int32 TotalCount
 	);

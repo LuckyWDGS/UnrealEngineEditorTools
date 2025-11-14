@@ -51,6 +51,10 @@
 #include "Engine/CollisionProfile.h"
 #include "EditorToolsUtilities.h"
 #include "Types/CollisionModeTextTypes.h"
+#include "ContentBrowserModule.h"
+#include "IContentBrowserSingleton.h"
+#include "Engine/Texture2D.h"
+#include "Logging/AssetObjectToken.h"
 
 
 #define LOCTEXT_NAMESPACE "FEditorToolsBPFLibrary"
@@ -634,7 +638,7 @@ TArray<FActorLightingInfo> UEditorToolsBPFLibrary::GetActorsWithInvalidLighting(
 				LightingInfo.BuildStatus != ELightingBuildStatus::InvalidSettings)
 			{
 				LightingInfo.BuildStatus = ELightingBuildStatus::Movable;
-				Problems.Add(TEXT("Component is not static"));
+				Problems.Add(TEXT("组件不是静态的"));
 			}
 			continue;
 		}
@@ -645,7 +649,7 @@ TArray<FActorLightingInfo> UEditorToolsBPFLibrary::GetActorsWithInvalidLighting(
 		{
 			ProblematicComponents++;
 			LightingInfo.BuildStatus = ELightingBuildStatus::InvalidSettings;
-			Problems.Add(TEXT("Component has no static mesh"));
+			Problems.Add(TEXT("组件没有静态网格体"));
 			continue;
 		}
 
@@ -664,7 +668,7 @@ TArray<FActorLightingInfo> UEditorToolsBPFLibrary::GetActorsWithInvalidLighting(
 		{
 			ProblematicComponents++;
 			LightingInfo.BuildStatus = ELightingBuildStatus::InvalidSettings;
-				Problems.Add(FString::Printf(TEXT("Component '%s' has invalid lightmap resolution: %d"), 
+				Problems.Add(FString::Printf(TEXT("组件 '%s' 的光照贴图分辨率无效: %d"), 
 					*MeshComponent->GetName(), LightmapResolution));
 			continue;
 		}
@@ -674,7 +678,7 @@ TArray<FActorLightingInfo> UEditorToolsBPFLibrary::GetActorsWithInvalidLighting(
 		{
 			ProblematicComponents++;
 			LightingInfo.BuildStatus = ELightingBuildStatus::InvalidSettings;
-			Problems.Add(FString::Printf(TEXT("Component '%s' has invalid lightmap coordinate index"), 
+			Problems.Add(FString::Printf(TEXT("组件 '%s' 的光照贴图坐标索引无效"), 
 				*MeshComponent->GetName()));
 			continue;
 		}
@@ -700,7 +704,7 @@ TArray<FActorLightingInfo> UEditorToolsBPFLibrary::GetActorsWithInvalidLighting(
 					{
 						ProblematicComponents++;
 						LightingInfo.BuildStatus = ELightingBuildStatus::NeedRebuild;
-						Problems.Add(FString::Printf(TEXT("Component '%s' has no valid lightmap data"), 
+						Problems.Add(FString::Printf(TEXT("组件 '%s' 没有有效的光照贴图数据"), 
 							*MeshComponent->GetName()));
 					}
 				}
@@ -708,7 +712,7 @@ TArray<FActorLightingInfo> UEditorToolsBPFLibrary::GetActorsWithInvalidLighting(
 				{
 					ProblematicComponents++;
 					LightingInfo.BuildStatus = ELightingBuildStatus::NeedRebuild;
-					Problems.Add(FString::Printf(TEXT("Component '%s' has no MapBuildDataId"), 
+					Problems.Add(FString::Printf(TEXT("组件 '%s' 没有 MapBuildDataId"), 
 						*MeshComponent->GetName()));
 				}
 			}
@@ -716,7 +720,7 @@ TArray<FActorLightingInfo> UEditorToolsBPFLibrary::GetActorsWithInvalidLighting(
 			{
 				ProblematicComponents++;
 				LightingInfo.BuildStatus = ELightingBuildStatus::NoLightmap;
-				Problems.Add(TEXT("Level has no MapBuildDataRegistry"));
+				Problems.Add(TEXT("关卡没有 MapBuildDataRegistry"));
 			}
 		}
 #endif
@@ -732,7 +736,7 @@ TArray<FActorLightingInfo> UEditorToolsBPFLibrary::GetActorsWithInvalidLighting(
 	else
 	{
 		LightingInfo.BuildStatus = ELightingBuildStatus::Valid;
-		LightingInfo.Description = TEXT("All components have valid lighting");
+		LightingInfo.Description = TEXT("所有组件都有有效的光照");
 	}
 
 		// 如果只包含静态的，过滤掉可移动的
@@ -744,17 +748,17 @@ TArray<FActorLightingInfo> UEditorToolsBPFLibrary::GetActorsWithInvalidLighting(
 		// 如果光照状态不是有效的，添加到列表
 		if (LightingInfo.BuildStatus != ELightingBuildStatus::Valid && 
 			LightingInfo.BuildStatus != ELightingBuildStatus::Movable)
-		{
+{
 			ActorsWithInvalidLighting.Add(LightingInfo);
 			ActorsWithProblems++;
-		}
+	}
 	}
 
 	// 写入消息日志（风格统一为 GetHighPolyActorsInScene 的格式）
 #if WITH_EDITOR
 	FMessageLogModule& MessageLogModule = FModuleManager::LoadModuleChecked<FMessageLogModule>("MessageLog");
 	TSharedPtr<IMessageLogListing> MessageLogListing = MessageLogModule.GetLogListing(FEditorToolsMessageLog::MessageLogName);
-	
+
 	if (!MessageLogListing.IsValid())
 	{
 		FEditorToolsMessageLog::Initialize();
@@ -795,7 +799,7 @@ TArray<FActorLightingInfo> UEditorToolsBPFLibrary::GetActorsWithInvalidLighting(
 				)
 			);
 		}
-
+		
 		// 计算对齐信息
 		const int32 RankWidth = FString::FromInt(ActorsWithInvalidLighting.Num()).Len();
 		int32 MaxNameLen = 0;
@@ -803,33 +807,6 @@ TArray<FActorLightingInfo> UEditorToolsBPFLibrary::GetActorsWithInvalidLighting(
 		{
 			MaxNameLen = FMath::Max(MaxNameLen, InfoForWidth.ActorName.Len());
 		}
-		const auto CenterByWidth = [](const FString& Source, int32 DesiredWidth) -> FString
-		{
-			if (DesiredWidth <= 0)
-			{
-				return Source;
-			}
-			const int32 TextLen = Source.Len();
-			if (TextLen >= DesiredWidth)
-			{
-				return Source.Left(DesiredWidth);
-			}
-			const int32 TotalPadding = DesiredWidth - TextLen;
-			const int32 LeftPadding = TotalPadding / 2;
-			const int32 RightPadding = TotalPadding - LeftPadding;
-			FString Result;
-			Result.Reserve(DesiredWidth);
-			if (LeftPadding > 0)
-			{
-				Result.Append(FString::ChrN(LeftPadding, TEXT(' ')));
-			}
-			Result.Append(Source);
-			if (RightPadding > 0)
-			{
-				Result.Append(FString::ChrN(RightPadding, TEXT(' ')));
-			}
-			return Result;
-		};
 
 		// 详细列表
 		for (int32 Rank = 0; Rank < ActorsWithInvalidLighting.Num(); ++Rank)
@@ -848,6 +825,12 @@ TArray<FActorLightingInfo> UEditorToolsBPFLibrary::GetActorsWithInvalidLighting(
 
 			// 左侧序号
 			FString RankStr = FString::FromInt(Rank + 1);
+			// 单个数字时 # 和数字之间有空格，多个数字时没有空格
+			// 对于单个数字，先添加空格，然后进行左填充；对于多个数字，直接左填充
+			if ((Rank + 1) < 10)
+			{
+				RankStr = FString::Printf(TEXT(" %s"), *RankStr);
+			}
 			RankStr = RankStr.LeftPad(RankWidth);
 
 			TSharedRef<FTokenizedMessage> Message = FTokenizedMessage::Create(
@@ -855,8 +838,12 @@ TArray<FActorLightingInfo> UEditorToolsBPFLibrary::GetActorsWithInvalidLighting(
 				FText::FromString(FString::Printf(TEXT("#%s. %s "), *RankStr, *StatusText))
 			);
 
-			// 可点击的Actor链接（名称按最大宽度居中）
-			const FString PaddedName = CenterByWidth(LightingInfo.ActorName, MaxNameLen);
+			// 可点击的Actor链接（名称左对齐，右填充到最大宽度）
+			FString PaddedName = LightingInfo.ActorName;
+			if (PaddedName.Len() < MaxNameLen)
+			{
+				PaddedName += FString::ChrN(MaxNameLen - PaddedName.Len(), TEXT(' '));
+			}
 			if (LightingInfo.Actor)
 			{
 				Message->AddToken(FImageToken::Create(TEXT("Icons.Search")));
@@ -868,7 +855,7 @@ TArray<FActorLightingInfo> UEditorToolsBPFLibrary::GetActorsWithInvalidLighting(
 			}
 
 			// 追加详情：类型 | 位置 | 组件统计 | 问题描述
-			const FString ActorClass = LightingInfo.Actor ? LightingInfo.Actor->GetClass()->GetName() : TEXT("Unknown");
+			const FString ActorClass = LightingInfo.Actor ? LightingInfo.Actor->GetClass()->GetName() : TEXT("未知");
 			const FVector ActorLocation = LightingInfo.Actor ? LightingInfo.Actor->GetActorLocation() : FVector::ZeroVector;
 			const FString LocationText = FString::Printf(TEXT("(X=%.0f, Y=%.0f, Z=%.0f)"), ActorLocation.X, ActorLocation.Y, ActorLocation.Z);
 			const FString DetailText = FString::Printf(
@@ -1011,10 +998,10 @@ TArray<FActorMeshComplexityInfo> UEditorToolsBPFLibrary::GetHighPolyActorsInScen
 				const FStaticMeshLODResources& LOD0Resources = StaticMesh->GetRenderData()->LODResources[0];
 				int32 LOD0Triangles = 0;
 				for (int32 SectionIndex = 0; SectionIndex < LOD0Resources.Sections.Num(); ++SectionIndex)
-				{
+					{
 					const FStaticMeshSection& Section = LOD0Resources.Sections[SectionIndex];
 					LOD0Triangles += Section.NumTriangles;
-				}
+					}
 				ActorLOD0Triangles += LOD0Triangles;
 
 				// 最后一个LOD
@@ -1029,8 +1016,8 @@ TArray<FActorMeshComplexityInfo> UEditorToolsBPFLibrary::GetHighPolyActorsInScen
 						LODNTriangles += Section.NumTriangles;
 					}
 					ActorLODNTriangles += LODNTriangles;
+					}
 				}
-			}
 
 			// 添加LOD信息到LODDetails（只添加LOD0和LOD N）
 			if (ActorLOD0Triangles > 0)
@@ -1086,10 +1073,10 @@ TArray<FActorMeshComplexityInfo> UEditorToolsBPFLibrary::GetHighPolyActorsInScen
 				const FSkeletalMeshLODRenderData& LOD0Data = RenderData->LODRenderData[0];
 				int32 LOD0Triangles = 0;
 				for (int32 SectionIndex = 0; SectionIndex < LOD0Data.RenderSections.Num(); ++SectionIndex)
-				{
+					{
 					const FSkelMeshRenderSection& Section = LOD0Data.RenderSections[SectionIndex];
 					LOD0Triangles += Section.NumTriangles;
-				}
+					}
 				ActorLOD0Triangles += LOD0Triangles;
 
 				// 最后一个LOD
@@ -1104,8 +1091,8 @@ TArray<FActorMeshComplexityInfo> UEditorToolsBPFLibrary::GetHighPolyActorsInScen
 						LODNTriangles += Section.NumTriangles;
 					}
 					ActorLODNTriangles += LODNTriangles;
+					}
 				}
-			}
 
 			// 添加LOD信息到LODDetails（只添加LOD0和LOD N）
 			if (ActorLOD0Triangles > 0)
@@ -1158,7 +1145,7 @@ TArray<FActorMeshComplexityInfo> UEditorToolsBPFLibrary::GetHighPolyActorsInScen
 		MessageLogListing->ClearMessages();
 
 		// 添加标题
-		FString FilterModeText = bOnlyStaticMeshActors ? TEXT("[仅纯静态网格体]") : TEXT("[所有网格体]");
+	FString FilterModeText = bOnlyStaticMeshActors ? TEXT("[仅纯静态网格体]") : TEXT("[所有网格体]");
 		MessageLogListing->AddMessage(
 			FTokenizedMessage::Create(
 				EMessageSeverity::Info,
@@ -1178,22 +1165,22 @@ TArray<FActorMeshComplexityInfo> UEditorToolsBPFLibrary::GetHighPolyActorsInScen
 		);
 
 		// 添加问题等级说明
-		if (HighPolyActorsCount > 0)
-		{
+	if (HighPolyActorsCount > 0)
+	{
 			MessageLogListing->AddMessage(
 				FTokenizedMessage::Create(
 					EMessageSeverity::Info,
 					LOCTEXT("HighPolyLevels", "问题等级分布：极高(>5x) | 很高(>3x) | 偏高(>2x) | 超标(>1x)")
 				)
 			);
-		}
+	}
 
 		int32 SeparatorLen = 80;
 		FString FooterSeparator = FString::ChrN(SeparatorLen, TEXT('-'));
-
+	
 		// 添加详细列表
-		if (HighPolyActors.Num() > 0)
-		{
+	if (HighPolyActors.Num() > 0)
+	{
 			// 预计算列宽：序号宽度与名称宽度，便于对齐显示
 			const int32 RankWidth = FString::FromInt(HighPolyActors.Num()).Len();
 			int32 MaxNameLen = 0;
@@ -1201,41 +1188,6 @@ TArray<FActorMeshComplexityInfo> UEditorToolsBPFLibrary::GetHighPolyActorsInScen
 			{
 				MaxNameLen = FMath::Max(MaxNameLen, InfoForWidth.ActorName.Len());
 			}
-
-			const auto CenterByWidth = [](const FString& Source, int32 DesiredWidth) -> FString
-			{
-				if (DesiredWidth <= 0)
-				{
-					return Source;
-				}
-
-				const int32 TextLen = Source.Len();
-				if (TextLen >= DesiredWidth)
-				{
-					return Source.Left(DesiredWidth);
-				}
-
-				const int32 TotalPadding = DesiredWidth - TextLen;
-				const int32 LeftPadding = TotalPadding / 2;
-				const int32 RightPadding = TotalPadding - LeftPadding;
-
-				FString Result;
-				Result.Reserve(DesiredWidth);
-
-				if (LeftPadding > 0)
-				{
-					Result.Append(FString::ChrN(LeftPadding, TEXT(' ')));
-				}
-
-				Result.Append(Source);
-
-				if (RightPadding > 0)
-				{
-					Result.Append(FString::ChrN(RightPadding, TEXT(' ')));
-				}
-
-				return Result;
-			};
 
 			SeparatorLen = FMath::Clamp(RankWidth + MaxNameLen + 50, 60, 120);
 			FooterSeparator = FString::ChrN(SeparatorLen, TEXT('-'));
@@ -1247,22 +1199,22 @@ TArray<FActorMeshComplexityInfo> UEditorToolsBPFLibrary::GetHighPolyActorsInScen
 				)
 			);
 
-			for (int32 Rank = 0; Rank < HighPolyActors.Num(); ++Rank)
-			{
-				const FActorMeshComplexityInfo& ComplexityInfo = HighPolyActors[Rank];
-				
+		for (int32 Rank = 0; Rank < HighPolyActors.Num(); ++Rank)
+		{
+			const FActorMeshComplexityInfo& ComplexityInfo = HighPolyActors[Rank];
+
 				// 确定网格体类型
-				FString MeshTypeText;
-				if (ComplexityInfo.MeshType == EMeshType::SkeletalMesh)
-				{
-					MeshTypeText = TEXT("骨骼网格体");
-				}
+			FString MeshTypeText;
+			if (ComplexityInfo.MeshType == EMeshType::SkeletalMesh)
+			{
+				MeshTypeText = TEXT("骨骼网格体");
+			}
 				else if (ComplexityInfo.Actor && ComplexityInfo.Actor->GetClass() == AStaticMeshActor::StaticClass())
 				{
 					MeshTypeText = TEXT("静态网格体");
-			}
-			else
-			{
+				}
+				else
+				{
 					MeshTypeText = TEXT("蓝图类");
 				}
 
@@ -1282,7 +1234,7 @@ TArray<FActorMeshComplexityInfo> UEditorToolsBPFLibrary::GetHighPolyActorsInScen
 						{
 							LODNIndex = LODInfo.LODIndex;
 							LODNTriangles = LODInfo.TriangleCount;
-						}
+				}
 					}
 				}
 				else if (LODCount == 1)
@@ -1305,49 +1257,63 @@ TArray<FActorMeshComplexityInfo> UEditorToolsBPFLibrary::GetHighPolyActorsInScen
 				// 构建LOD信息文本
 				FString LODInfoText;
 				if (LODCount > 1)
-				{
+			{
 					LODInfoText = FString::Printf(TEXT("LOD0:%s (最大) | LOD%d:%s (最小) | 共%d个LOD层级"), 
 						*FormattedLOD0, LODNIndex, *FormattedLODN, LODCount);
-				}
-				else
-				{
+			}
+			else
+			{
 					LODInfoText = FString::Printf(TEXT("LOD0:%s | 共1个LOD层级"), *FormattedLOD0);
-				}
+		}
 
 				// 计算倍数
 				float Multiplier = (float)LOD0Triangles / (float)TriangleThreshold;
 				
-				// 根据倍数确定严重程度和颜色，直接内联使用
-				// 创建可点击的消息（左侧序号按列宽对齐）
-				FString RankStr = FString::FromInt(Rank + 1);
-				RankStr = RankStr.LeftPad(RankWidth);
-				TSharedRef<FTokenizedMessage> Message = FTokenizedMessage::Create(
-					(Multiplier >= 3.0f) ? EMessageSeverity::Error : EMessageSeverity::Warning,
-					FText::FromString(FString::Printf(TEXT("#%s. "), *RankStr))
-				);
+			// 根据倍数确定严重程度和颜色，直接内联使用
+			// 创建可点击的消息（左侧序号按列宽对齐，序号后显示类型）
+			FString RankStr = FString::FromInt(Rank + 1);
+			// 单个数字时 # 和数字之间有空格，多个数字时没有空格
+			// 对于单个数字，先添加空格，然后进行左填充；对于多个数字，直接左填充
+			if ((Rank + 1) < 10)
+	{
+				RankStr = FString::Printf(TEXT(" %s"), *RankStr);
+		}
+			RankStr = RankStr.LeftPad(RankWidth);
+			TSharedRef<FTokenizedMessage> Message = FTokenizedMessage::Create(
+				EMessageSeverity::Warning,
+				FText::FromString(FString::Printf(TEXT("#%s. [%s] "), *RankStr, *MeshTypeText))
+			);
 
-				// 添加可点击的Actor链接
-				if (ComplexityInfo.Actor)
+			// 添加可点击的Actor链接
+			if (ComplexityInfo.Actor)
+			{
+				// 使用自定义的 FActorSelectToken，只选中Actor，不移动摄像机
+				// 名称左对齐，右填充到最大宽度，保证后续列对齐
+				FString PaddedName = ComplexityInfo.ActorName;
+				if (PaddedName.Len() < MaxNameLen)
 				{
-					// 使用自定义的 FActorSelectToken，只选中Actor，不移动摄像机
-					// 名称按最大宽度居中对齐，保证后续列对齐
-					const FString PaddedName = CenterByWidth(ComplexityInfo.ActorName, MaxNameLen);
-					Message->AddToken(FImageToken::Create(TEXT("Icons.Search")));
-					Message->AddToken(FActorSelectToken::Create(
-						ComplexityInfo.Actor,
-						FText::FromString(PaddedName)
-					));
+					PaddedName += FString::ChrN(MaxNameLen - PaddedName.Len(), TEXT(' '));
+			}
+				Message->AddToken(FImageToken::Create(TEXT("Icons.Search")));
+				Message->AddToken(FActorSelectToken::Create(
+					ComplexityInfo.Actor,
+					FText::FromString(PaddedName)
+				));
 			}
 			else
 			{
-					const FString PaddedName = CenterByWidth(ComplexityInfo.ActorName, MaxNameLen);
-					Message->AddToken(FTextToken::Create(FText::FromString(PaddedName)));
+				FString PaddedName = ComplexityInfo.ActorName;
+				if (PaddedName.Len() < MaxNameLen)
+				{
+					PaddedName += FString::ChrN(MaxNameLen - PaddedName.Len(), TEXT(' '));
 				}
+				Message->AddToken(FTextToken::Create(FText::FromString(PaddedName)));
+			}
 
-				// 添加详细信息
-				FString DetailText = FString::Printf(TEXT(" [%s] %s | %s | %.1fx阈值"), 
-					*MeshTypeText, *LocationText, *LODInfoText, Multiplier);
-				Message->AddToken(FTextToken::Create(FText::FromString(DetailText)));
+			// 添加详细信息（已移除类型，因为已在序号后显示）
+			FString DetailText = FString::Printf(TEXT(" %s | %s | %.1fx阈值"), 
+				*LocationText, *LODInfoText, Multiplier);
+			Message->AddToken(FTextToken::Create(FText::FromString(DetailText)));
 
 				MessageLogListing->AddMessage(Message);
 			}
@@ -1363,7 +1329,7 @@ TArray<FActorMeshComplexityInfo> UEditorToolsBPFLibrary::GetHighPolyActorsInScen
 
 		// 打开消息日志窗口
 		MessageLogModule.OpenMessageLog(FEditorToolsMessageLog::MessageLogName);
-	}
+		}
 #endif
 
 	return HighPolyActors;
@@ -1552,29 +1518,19 @@ FSceneLightStatistics UEditorToolsBPFLibrary::GetSceneLightStatistics(UObject* W
 		{
 			MaxNameLen = FMath::Max(MaxNameLen, InfoForWidth.LightName.Len());
 		}
-		const auto CenterByWidth = [](const FString& Source, int32 DesiredWidth) -> FString
-		{
-			if (DesiredWidth <= 0) return Source;
-			const int32 TextLen = Source.Len();
-			if (TextLen >= DesiredWidth) return Source.Left(DesiredWidth);
-			const int32 TotalPadding = DesiredWidth - TextLen;
-			const int32 LeftPadding = TotalPadding / 2;
-			const int32 RightPadding = TotalPadding - LeftPadding;
-			FString Result;
-			Result.Reserve(DesiredWidth);
-			if (LeftPadding > 0) Result.Append(FString::ChrN(LeftPadding, TEXT(' ')));
-			Result.Append(Source);
-			if (RightPadding > 0) Result.Append(FString::ChrN(RightPadding, TEXT(' ')));
-			return Result;
-		};
-
 		// 列表
 		for (int32 Rank = 0; Rank < Statistics.LightInfoList.Num(); ++Rank)
-		{
+	{
 			const FLightActorInfo& Info = Statistics.LightInfoList[Rank];
 
 			// 左侧序号
 			FString RankStr = FString::FromInt(Rank + 1);
+			// 单个数字时 # 和数字之间有空格，多个数字时没有空格
+			// 对于单个数字，先添加空格，然后进行左填充；对于多个数字，直接左填充
+			if ((Rank + 1) < 10)
+			{
+				RankStr = FString::Printf(TEXT(" %s"), *RankStr);
+			}
 			RankStr = RankStr.LeftPad(RankWidth);
 
 			// 严重级别：动态光为警告，其余信息
@@ -1587,8 +1543,12 @@ FSceneLightStatistics UEditorToolsBPFLibrary::GetSceneLightStatistics(UObject* W
 				FText::FromString(FString::Printf(TEXT("#%s. [%s] "), *RankStr, *Info.MobilityText))
 			);
 
-			// 可点击名称
-			const FString PaddedName = CenterByWidth(Info.LightName, MaxNameLen);
+			// 可点击名称（名称左对齐，右填充到最大宽度）
+			FString PaddedName = Info.LightName;
+			if (PaddedName.Len() < MaxNameLen)
+			{
+				PaddedName += FString::ChrN(MaxNameLen - PaddedName.Len(), TEXT(' '));
+			}
 			if (Info.LightActor)
 			{
 				Message->AddToken(FImageToken::Create(TEXT("Icons.Search")));
@@ -1607,7 +1567,7 @@ FSceneLightStatistics UEditorToolsBPFLibrary::GetSceneLightStatistics(UObject* W
 			Message->AddToken(FTextToken::Create(FText::FromString(DetailText)));
 
 			MessageLogListing->AddMessage(Message);
-		}
+	}
 
 		// 添加结束分隔线
 		{
@@ -1687,16 +1647,24 @@ namespace
 	}
 }
 
-TArray<FUnusedAssetInfo> UEditorToolsBPFLibrary::FindUnusedMeshesInFolder(const FString& FolderPath)
+TArray<FUnusedAssetInfo> UEditorToolsBPFLibrary::FindUnusedMeshesInFolder(const TArray<FString>& FolderPaths)
 {
 	TArray<FUnusedAssetInfo> UnusedAssets;
 
 #if WITH_EDITOR
-	FString EffectiveFolderPath = FolderPath;
-	if (EffectiveFolderPath.IsEmpty())
+	TArray<FString> EffectiveFolderPaths = FolderPaths;
+
+	// 如果 FolderPaths 为空，从内容浏览器获取选中的文件夹
+	if (EffectiveFolderPaths.Num() == 0)
+	{
+		FContentBrowserModule& ContentBrowserModule = FModuleManager::LoadModuleChecked<FContentBrowserModule>("ContentBrowser");
+		ContentBrowserModule.Get().GetSelectedFolders(EffectiveFolderPaths);
+	}
+
+	if (EffectiveFolderPaths.Num() == 0)
 	{
 		UEditorToolsUtilities::LogWarningToMessageLogAndOpen(
-			LOCTEXT("MeshesFolderPathEmpty", "请先在内容浏览器中选择一个文件夹，然后再执行“检查未使用的模型”。")
+			LOCTEXT("MeshesFolderPathEmpty", "请先在内容浏览器中选择一个或多个文件夹，然后再执行“检查未使用的模型”。")
 		);
 		return UnusedAssets;
 	}
@@ -1704,23 +1672,27 @@ TArray<FUnusedAssetInfo> UEditorToolsBPFLibrary::FindUnusedMeshesInFolder(const 
 	FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry");
 	IAssetRegistry& AssetRegistry = AssetRegistryModule.Get();
 
-	// 转换并确保路径格式正确
-	FString SearchPath = NormalizeFolderPath(EffectiveFolderPath);
-
-	// 获取文件夹内的所有资源
-	TArray<FAssetData> AllAssets;
-	AssetRegistry.GetAssetsByPath(FName(*SearchPath), AllAssets, true);
-
-	// 过滤出静态网格体和骨骼网格体
+	// 收集所有文件夹内的资源
 	TArray<FAssetData> AllMeshAssets;
 	FTopLevelAssetPath StaticMeshClassPath = UStaticMesh::StaticClass()->GetClassPathName();
 	FTopLevelAssetPath SkeletalMeshClassPath = USkeletalMesh::StaticClass()->GetClassPathName();
-	
-	for (const FAssetData& AssetData : AllAssets)
+
+	for (const FString& FolderPath : EffectiveFolderPaths)
 	{
-		if (AssetData.AssetClassPath == StaticMeshClassPath || AssetData.AssetClassPath == SkeletalMeshClassPath)
-		{
-			AllMeshAssets.Add(AssetData);
+		// 转换并确保路径格式正确
+		FString SearchPath = NormalizeFolderPath(FolderPath);
+
+		// 获取文件夹内的所有资源
+		TArray<FAssetData> AllAssets;
+		AssetRegistry.GetAssetsByPath(FName(*SearchPath), AllAssets, true);
+
+		// 过滤出静态网格体和骨骼网格体
+		for (const FAssetData& AssetData : AllAssets)
+			{
+			if (AssetData.AssetClassPath == StaticMeshClassPath || AssetData.AssetClassPath == SkeletalMeshClassPath)
+			{
+				AllMeshAssets.Add(AssetData);
+			}
 		}
 	}
 
@@ -1759,22 +1731,30 @@ TArray<FUnusedAssetInfo> UEditorToolsBPFLibrary::FindUnusedMeshesInFolder(const 
 	}
 
 	// 显示可点击的消息日志
-	FEditorToolsMessageLog::ShowUnusedAssetsReport(TEXT("模型"), EffectiveFolderPath, UnusedAssets, AllMeshAssets.Num());
+	FEditorToolsMessageLog::ShowUnusedAssetsReport(TEXT("模型"), EffectiveFolderPaths, UnusedAssets, AllMeshAssets.Num());
 #endif
 
 	return UnusedAssets;
 }
 
-TArray<FUnusedAssetInfo> UEditorToolsBPFLibrary::FindUnusedMaterialsInFolder(const FString& FolderPath)
+TArray<FUnusedAssetInfo> UEditorToolsBPFLibrary::FindUnusedMaterialsInFolder(const TArray<FString>& FolderPaths)
 {
 	TArray<FUnusedAssetInfo> UnusedAssets;
 
 #if WITH_EDITOR
-	FString EffectiveFolderPath = FolderPath;
-	if (EffectiveFolderPath.IsEmpty())
+	TArray<FString> EffectiveFolderPaths = FolderPaths;
+
+	// 如果 FolderPaths 为空，从内容浏览器获取选中的文件夹
+	if (EffectiveFolderPaths.Num() == 0)
+	{
+		FContentBrowserModule& ContentBrowserModule = FModuleManager::LoadModuleChecked<FContentBrowserModule>("ContentBrowser");
+		ContentBrowserModule.Get().GetSelectedFolders(EffectiveFolderPaths);
+	}
+
+	if (EffectiveFolderPaths.Num() == 0)
 	{
 		UEditorToolsUtilities::LogWarningToMessageLogAndOpen(
-			LOCTEXT("MaterialsFolderPathEmpty", "请先在内容浏览器中选择一个文件夹，然后再执行“检查未使用的材质”。")
+			LOCTEXT("MaterialsFolderPathEmpty", "请先在内容浏览器中选择一个或多个文件夹，然后再执行“检查未使用的材质”。")
 		);
 		return UnusedAssets;
 	}
@@ -1782,21 +1762,25 @@ TArray<FUnusedAssetInfo> UEditorToolsBPFLibrary::FindUnusedMaterialsInFolder(con
 	FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry");
 	IAssetRegistry& AssetRegistry = AssetRegistryModule.Get();
 
-	// 转换并确保路径格式正确
-	FString SearchPath = NormalizeFolderPath(EffectiveFolderPath);
-
-	// 获取文件夹内的所有材质
-	TArray<FAssetData> MaterialAssets;
-	AssetRegistry.GetAssetsByPath(FName(*SearchPath), MaterialAssets, true);
-	
-	// 过滤出材质资源
+	// 收集所有文件夹内的材质
 	TArray<FAssetData> FilteredMaterials;
-	for (const FAssetData& AssetData : MaterialAssets)
+	for (const FString& FolderPath : EffectiveFolderPaths)
 	{
-		FString ClassName = AssetData.AssetClassPath.GetAssetName().ToString();
-		if (ClassName.Contains(TEXT("Material")) && AssetData.PackagePath.ToString().StartsWith(SearchPath))
+		// 转换并确保路径格式正确
+		FString SearchPath = NormalizeFolderPath(FolderPath);
+
+		// 获取文件夹内的所有材质
+		TArray<FAssetData> MaterialAssets;
+		AssetRegistry.GetAssetsByPath(FName(*SearchPath), MaterialAssets, true);
+		
+		// 过滤出材质资源
+		for (const FAssetData& AssetData : MaterialAssets)
 		{
-			FilteredMaterials.Add(AssetData);
+			FString ClassName = AssetData.AssetClassPath.GetAssetName().ToString();
+			if (ClassName.Contains(TEXT("Material")) && AssetData.PackagePath.ToString().StartsWith(SearchPath))
+			{
+				FilteredMaterials.Add(AssetData);
+			}
 		}
 	}
 
@@ -1835,22 +1819,30 @@ TArray<FUnusedAssetInfo> UEditorToolsBPFLibrary::FindUnusedMaterialsInFolder(con
 	}
 
 	// 显示可点击的消息日志
-	FEditorToolsMessageLog::ShowUnusedAssetsReport(TEXT("材质"), EffectiveFolderPath, UnusedAssets, FilteredMaterials.Num());
+	FEditorToolsMessageLog::ShowUnusedAssetsReport(TEXT("材质"), EffectiveFolderPaths, UnusedAssets, FilteredMaterials.Num());
 #endif
 
 	return UnusedAssets;
 }
 
-TArray<FUnusedAssetInfo> UEditorToolsBPFLibrary::FindUnusedTexturesInFolder(const FString& FolderPath)
+TArray<FUnusedAssetInfo> UEditorToolsBPFLibrary::FindUnusedTexturesInFolder(const TArray<FString>& FolderPaths)
 {
 	TArray<FUnusedAssetInfo> UnusedAssets;
 
 #if WITH_EDITOR
-	FString EffectiveFolderPath = FolderPath;
-	if (EffectiveFolderPath.IsEmpty())
+	TArray<FString> EffectiveFolderPaths = FolderPaths;
+
+	// 如果 FolderPaths 为空，从内容浏览器获取选中的文件夹
+	if (EffectiveFolderPaths.Num() == 0)
+	{
+		FContentBrowserModule& ContentBrowserModule = FModuleManager::LoadModuleChecked<FContentBrowserModule>("ContentBrowser");
+		ContentBrowserModule.Get().GetSelectedFolders(EffectiveFolderPaths);
+	}
+
+	if (EffectiveFolderPaths.Num() == 0)
 	{
 		UEditorToolsUtilities::LogWarningToMessageLogAndOpen(
-			LOCTEXT("TexturesFolderPathEmpty", "请先在内容浏览器中选择一个文件夹，然后再执行“检查未使用的贴图”。")
+			LOCTEXT("TexturesFolderPathEmpty", "请先在内容浏览器中选择一个或多个文件夹，然后再执行“检查未使用的贴图”。")
 		);
 		return UnusedAssets;
 	}
@@ -1858,21 +1850,25 @@ TArray<FUnusedAssetInfo> UEditorToolsBPFLibrary::FindUnusedTexturesInFolder(cons
 	FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry");
 	IAssetRegistry& AssetRegistry = AssetRegistryModule.Get();
 
-	// 转换并确保路径格式正确
-	FString SearchPath = NormalizeFolderPath(EffectiveFolderPath);
-
-	// 获取文件夹内的所有贴图
-	TArray<FAssetData> TextureAssets;
-	AssetRegistry.GetAssetsByPath(FName(*SearchPath), TextureAssets, true);
-	
-	// 过滤出贴图资源
+	// 收集所有文件夹内的贴图
 	TArray<FAssetData> FilteredTextures;
-	for (const FAssetData& AssetData : TextureAssets)
+	for (const FString& FolderPath : EffectiveFolderPaths)
 	{
-		FString ClassName = AssetData.AssetClassPath.GetAssetName().ToString();
-		if (ClassName.Contains(TEXT("Texture")) && AssetData.PackagePath.ToString().StartsWith(SearchPath))
+		// 转换并确保路径格式正确
+		FString SearchPath = NormalizeFolderPath(FolderPath);
+
+		// 获取文件夹内的所有贴图
+		TArray<FAssetData> TextureAssets;
+		AssetRegistry.GetAssetsByPath(FName(*SearchPath), TextureAssets, true);
+		
+		// 过滤出贴图资源
+		for (const FAssetData& AssetData : TextureAssets)
 		{
-			FilteredTextures.Add(AssetData);
+			FString ClassName = AssetData.AssetClassPath.GetAssetName().ToString();
+			if (ClassName.Contains(TEXT("Texture")) && AssetData.PackagePath.ToString().StartsWith(SearchPath))
+			{
+				FilteredTextures.Add(AssetData);
+			}
 		}
 	}
 
@@ -1911,7 +1907,7 @@ TArray<FUnusedAssetInfo> UEditorToolsBPFLibrary::FindUnusedTexturesInFolder(cons
 	}
 
 	// 显示可点击的消息日志
-	FEditorToolsMessageLog::ShowUnusedAssetsReport(TEXT("贴图"), EffectiveFolderPath, UnusedAssets, FilteredTextures.Num());
+	FEditorToolsMessageLog::ShowUnusedAssetsReport(TEXT("贴图"), EffectiveFolderPaths, UnusedAssets, FilteredTextures.Num());
 #endif
 
 	return UnusedAssets;
@@ -2014,12 +2010,14 @@ TArray<AStaticMeshActor*> UEditorToolsBPFLibrary::GetAllStaticMeshActorsInScene(
 				AStaticMeshActor* Actor = Info.Actor.Get();
 				if (Actor)
 				{
+					// 单个数字时 # 和数字之间有空格，多个数字时没有空格
+					int32 CurrentIndex = Index++;
+					FString IndexPrefix = (CurrentIndex < 10) ? TEXT("# ") : TEXT("#");
+					FString IndexText = FString::Printf(TEXT("%s%d. "), *IndexPrefix, CurrentIndex);
+					
 					TSharedRef<FTokenizedMessage> Message = FTokenizedMessage::Create(
 						EMessageSeverity::Info,
-						FText::Format(
-							LOCTEXT("StaticMeshCollisionEntryIndex", "{0}. "),
-							FText::AsNumber(Index++)
-						)
+						FText::FromString(IndexText)
 					);
 
 					Message->AddToken(FImageToken::Create(TEXT("Icons.Search")));
@@ -2049,7 +2047,7 @@ TArray<AStaticMeshActor*> UEditorToolsBPFLibrary::GetAllStaticMeshActorsInScene(
 					Message->AddToken(FTextToken::Create(LOCTEXT("StaticMeshCollisionActionHintToken", ">> 可在“详情”中视情况调整碰撞设置")));
 
 					MessageLogListing->AddMessage(Message);
-				}
+		}
 			}
 		}
 		else
@@ -2186,12 +2184,14 @@ void UEditorToolsBPFLibrary::DisableCollisionForSelectedStaticMeshActors()
 				continue;
 			}
 
+			// 单个数字时 # 和数字之间有空格，多个数字时没有空格
+			int32 CurrentIndex = Index++;
+			FString IndexPrefix = (CurrentIndex < 10) ? TEXT("# ") : TEXT("#");
+			FString IndexText = FString::Printf(TEXT("%s%d. "), *IndexPrefix, CurrentIndex);
+			
 			TSharedRef<FTokenizedMessage> Message = FTokenizedMessage::Create(
 				EMessageSeverity::Info,
-				FText::Format(
-					LOCTEXT("DisableCollisionEntryIndex", "{0}. "),
-					FText::AsNumber(Index++)
-				)
+				FText::FromString(IndexText)
 			);
 
 			Message->AddToken(FImageToken::Create(TEXT("Icons.Search")));
@@ -2241,6 +2241,227 @@ void UEditorToolsBPFLibrary::DisableCollisionForSelectedStaticMeshActors()
 #else
 	UE_LOG(LogTemp, Warning, TEXT("DisableCollisionForSelectedStaticMeshActors can only be used in the editor."));
 #endif
+}
+
+TArray<FTextureSizeInfo> UEditorToolsBPFLibrary::CheckTextureSizesInFolders(const TArray<FString>& FolderPaths)
+{
+	TArray<FTextureSizeInfo> TextureSizeInfos;
+
+#if WITH_EDITOR
+	TArray<FString> EffectiveFolderPaths = FolderPaths;
+
+	// 如果 FolderPaths 为空，从内容浏览器获取选中的文件夹
+	if (EffectiveFolderPaths.Num() == 0)
+	{
+		FContentBrowserModule& ContentBrowserModule = FModuleManager::LoadModuleChecked<FContentBrowserModule>("ContentBrowser");
+		ContentBrowserModule.Get().GetSelectedFolders(EffectiveFolderPaths);
+	}
+
+	if (EffectiveFolderPaths.Num() == 0)
+	{
+		UEditorToolsUtilities::LogWarningToMessageLogAndOpen(
+			LOCTEXT("TextureSizeNoFolder", "请先在内容浏览器中选择一个或多个文件夹，然后再执行“检查贴图大小”。")
+		);
+		return TextureSizeInfos;
+	}
+
+	FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry");
+	IAssetRegistry& AssetRegistry = AssetRegistryModule.Get();
+
+	// 收集所有文件夹内的贴图资源
+	TArray<FAssetData> AllTextureAssets;
+	for (const FString& FolderPath : EffectiveFolderPaths)
+	{
+		FString SearchPath = NormalizeFolderPath(FolderPath);
+		TArray<FAssetData> TextureAssets;
+		AssetRegistry.GetAssetsByPath(FName(*SearchPath), TextureAssets, true);
+
+		// 过滤出贴图资源
+		for (const FAssetData& AssetData : TextureAssets)
+		{
+			FString ClassName = AssetData.AssetClassPath.GetAssetName().ToString();
+			if (ClassName.Contains(TEXT("Texture")) && AssetData.PackagePath.ToString().StartsWith(SearchPath))
+			{
+				AllTextureAssets.Add(AssetData);
+			}
+		}
+	}
+
+	// 获取每个贴图的分辨率信息
+	for (const FAssetData& AssetData : AllTextureAssets)
+	{
+		UTexture2D* Texture = Cast<UTexture2D>(AssetData.GetAsset());
+		if (Texture)
+		{
+			FTextureSizeInfo Info;
+			Info.TexturePath = AssetData.PackagePath.ToString();
+			Info.TextureName = AssetData.AssetName.ToString();
+			Info.Width = Texture->GetSizeX();
+			Info.Height = Texture->GetSizeY();
+			Info.MaxSize = FMath::Max(Info.Width, Info.Height);
+			Info.TextureObject = Texture;
+
+			TextureSizeInfos.Add(Info);
+		}
+	}
+
+	// 按最大尺寸从大到小排序
+	TextureSizeInfos.Sort([](const FTextureSizeInfo& A, const FTextureSizeInfo& B)
+	{
+		return A.MaxSize > B.MaxSize;
+	});
+
+	// 显示消息日志
+	FMessageLogModule& MessageLogModule = FModuleManager::LoadModuleChecked<FMessageLogModule>("MessageLog");
+	TSharedPtr<IMessageLogListing> MessageLogListing = MessageLogModule.GetLogListing(FEditorToolsMessageLog::MessageLogName);
+
+	if (!MessageLogListing.IsValid())
+	{
+		FEditorToolsMessageLog::Initialize();
+		MessageLogListing = MessageLogModule.GetLogListing(FEditorToolsMessageLog::MessageLogName);
+	}
+
+	if (!MessageLogListing.IsValid())
+	{
+		return TextureSizeInfos;
+	}
+
+	// 清空之前的消息
+	MessageLogListing->ClearMessages();
+
+	// 添加标题
+	MessageLogListing->AddMessage(
+		FTokenizedMessage::Create(
+			EMessageSeverity::Info,
+			LOCTEXT("TextureSizeHeader", "------------------ 检查贴图大小 ------------------")
+		)
+	);
+
+	// 添加文件夹路径信息
+	FString FolderPathsText;
+	if (EffectiveFolderPaths.Num() == 1)
+	{
+		FolderPathsText = EffectiveFolderPaths[0];
+	}
+	else
+	{
+		FolderPathsText = FString::Printf(TEXT("%d个文件夹"), EffectiveFolderPaths.Num());
+	}
+
+	MessageLogListing->AddMessage(
+		FTokenizedMessage::Create(
+			EMessageSeverity::Info,
+			FText::Format(LOCTEXT("TextureSizeFolderPath", "文件夹路径: {0}"), FText::FromString(FolderPathsText))
+		)
+	);
+
+	// 添加统计信息
+	int32 LargeTextureCount = 0;
+	for (const FTextureSizeInfo& Info : TextureSizeInfos)
+	{
+		if (Info.MaxSize > 1024)
+		{
+			LargeTextureCount++;
+		}
+	}
+
+	MessageLogListing->AddMessage(
+		FTokenizedMessage::Create(
+			EMessageSeverity::Info,
+			FText::Format(LOCTEXT("TextureSizeStats", "找到 {0} 个贴图资源，其中 {1} 个贴图的最大尺寸超过 1024"), 
+				FText::AsNumber(TextureSizeInfos.Num()),
+				FText::AsNumber(LargeTextureCount))
+		)
+	);
+
+	// 添加详细列表
+	if (TextureSizeInfos.Num() > 0)
+	{
+		// 计算对齐信息
+		const int32 RankWidth = FString::FromInt(TextureSizeInfos.Num()).Len();
+		int32 MaxNameLen = 0;
+		for (const FTextureSizeInfo& InfoForWidth : TextureSizeInfos)
+		{
+			MaxNameLen = FMath::Max(MaxNameLen, InfoForWidth.TextureName.Len());
+		}
+
+		MessageLogListing->AddMessage(
+			FTokenizedMessage::Create(
+				EMessageSeverity::Warning,
+				LOCTEXT("TextureSizeListHeader", "详细贴图列表（按分辨率从大到小排序，点击可定位）：")
+			)
+		);
+
+		for (int32 i = 0; i < TextureSizeInfos.Num(); ++i)
+		{
+			const FTextureSizeInfo& Info = TextureSizeInfos[i];
+
+			// 左侧序号
+			FString RankStr = FString::FromInt(i + 1);
+			// 单个数字时 # 和数字之间有空格，多个数字时没有空格
+			// 对于单个数字，先添加空格，然后进行左填充；对于多个数字，直接左填充
+			if ((i + 1) < 10)
+			{
+				RankStr = FString::Printf(TEXT(" %s"), *RankStr);
+			}
+			RankStr = RankStr.LeftPad(RankWidth);
+
+			// 判断是否大于1024，使用警告级别
+			const bool bIsLarge = Info.MaxSize > 1024;
+			const EMessageSeverity::Type Severity = bIsLarge ? EMessageSeverity::Warning : EMessageSeverity::Info;
+
+			TSharedRef<FTokenizedMessage> Message = FTokenizedMessage::Create(
+				Severity,
+				FText::FromString(FString::Printf(TEXT("#%s. [贴图] "), *RankStr))
+			);
+
+			// 添加可点击的贴图链接（名称左对齐，右填充到最大宽度）
+			FString PaddedName = Info.TextureName;
+			if (PaddedName.Len() < MaxNameLen)
+			{
+				PaddedName += FString::ChrN(MaxNameLen - PaddedName.Len(), TEXT(' '));
+			}
+
+			if (Info.TextureObject)
+			{
+				// 手动添加放大镜图标以保持一致性
+				Message->AddToken(FImageToken::Create(TEXT("Icons.Search")));
+				Message->AddToken(FAssetObjectToken::Create(Info.TextureObject, FText::FromString(PaddedName)));
+		}
+			else
+			{
+				// 如果无法加载贴图，使用文本显示
+				Message->AddToken(FImageToken::Create(TEXT("Icons.Search")));
+				Message->AddToken(FTextToken::Create(FText::FromString(PaddedName)));
+			}
+
+			// 添加分辨率信息（用[]框起来）
+			FString SizeText = FString::Printf(TEXT(" [%dx%d]"), Info.Width, Info.Height);
+			Message->AddToken(FTextToken::Create(FText::FromString(SizeText)));
+
+			// 添加路径信息
+			FString FullAssetPath = Info.TexturePath + TEXT("/") + Info.TextureName;
+			Message->AddToken(FTextToken::Create(FText::Format(LOCTEXT("TexturePath", " ({0})"), FText::FromString(FullAssetPath))));
+
+			MessageLogListing->AddMessage(Message);
+		}
+	}
+
+	// 添加结束分隔线
+	const int32 SeparatorLen = 80;
+	const FString FooterSeparator = FString::ChrN(SeparatorLen, TEXT('-'));
+	MessageLogListing->AddMessage(
+		FTokenizedMessage::Create(
+			EMessageSeverity::Info,
+			FText::FromString(FooterSeparator)
+		)
+	);
+
+	// 打开消息日志窗口
+	MessageLogModule.OpenMessageLog(FEditorToolsMessageLog::MessageLogName);
+#endif
+
+	return TextureSizeInfos;
 }
 
 #undef LOCTEXT_NAMESPACE
