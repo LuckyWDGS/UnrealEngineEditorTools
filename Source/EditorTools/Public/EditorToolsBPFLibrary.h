@@ -85,7 +85,11 @@ public:
 
 	//获取场景中所有超过指定三角面数的网格体Actor（显示LOD0和LOD N，静态和骨骼网格体）
 	UFUNCTION(BlueprintCallable, Category = "Editor Tools BP Library|Mesh Complexity", meta = (WorldContext = "WorldContextObject"))
-	static TArray<FActorMeshComplexityInfo> GetHighPolyActorsInScene(UObject* WorldContextObject, int32 TriangleThreshold = 100000, bool bOnlyStaticMeshActors = true);
+	static TArray<FActorMeshComplexityInfo> GetHighPolyActorsInScene(UObject* WorldContextObject, int32 TriangleThreshold = 100);
+
+	//获取场景中所有网格体Actor的材质插槽（按材质插槽数量从高到低排序，2个及以上用黄色感叹号标注）
+	UFUNCTION(BlueprintCallable, Category = "Editor Tools BP Library|Mesh Complexity", meta = (WorldContext = "WorldContextObject"))
+	static TArray<FActorMaterialSlotInfo> GetActorsMaterialSlotsInScene(UObject* WorldContextObject, int32 MaterialSlotThreshold = 1);
 
 	// ==================== 静态网格体管理 ====================
 
@@ -96,6 +100,14 @@ public:
 	// 关闭当前所选静态网格体Actor的碰撞
 	UFUNCTION(BlueprintCallable, Category = "Editor Tools BP Library|Static Mesh")
 	static void DisableCollisionForSelectedStaticMeshActors();
+
+	// 获取当前场景中所有的静态网格体Actor，并在消息日志中列出开启投射阴影的Actor（带定位功能）
+	UFUNCTION(BlueprintCallable, Category = "Editor Tools BP Library|Static Mesh", meta = (WorldContext = "WorldContextObject"))
+	static TArray<AStaticMeshActor*> GetAllStaticMeshActorsWithShadowCasting(UObject* WorldContextObject);
+
+	// 关闭当前所选静态网格体Actor的投射阴影
+	UFUNCTION(BlueprintCallable, Category = "Editor Tools BP Library|Static Mesh")
+	static void DisableShadowCastingForSelectedStaticMeshActors();
 
 	// ==================== 光照构建 ====================
 	
@@ -132,6 +144,12 @@ public:
 	//如果FolderPaths为空，则从内容浏览器获取选中的文件夹
 	UFUNCTION(BlueprintCallable, Category = "Editor Tools BP Library|Texture Size")
 	static TArray<FTextureSizeInfo> CheckTextureSizesInFolders(const TArray<FString>& FolderPaths);
+
+	// ==================== Draw Call 分析 ====================
+
+	// 获取当前视野内（根据最近渲染时间阈值）的Actor DrawCall概览
+	UFUNCTION(BlueprintCallable, Category = "Editor Tools BP Library|Draw Call", meta = (WorldContext = "WorldContextObject"))
+	static TArray<FActorDrawCallInfo> GetVisibleActorsDrawCallStats(UObject* WorldContextObject);
 
 	
 	

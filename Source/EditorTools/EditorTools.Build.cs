@@ -33,33 +33,34 @@ public class EditorTools : ModuleRules
 			);
 			
 		
-	PrivateDependencyModuleNames.AddRange(
-		new string[]
-		{
-			"CoreUObject",
-			"Engine",
-			"Slate",
-			"SlateCore",
-			"Projects",
-			"MeshDescription",
-			"StaticMeshDescription",
-			"RawMesh",
-			"AssetRegistry",
-			"UnrealEd",
-			"AssetTools",
-			"ToolMenus",
-			"Persona",
-			"SkeletalMeshEditor",
-			"AnimationEditor",
-			"UnrealEd",	
-			"MaterialEditor",
-			"LevelEditor",
-			"Blutility",
-			"UMGEditor",
-			"MessageLog",
-			"ContentBrowser",
-			// ... add private dependencies that you statically link with here ...	
-		}
+		PrivateDependencyModuleNames.AddRange(
+			new string[]
+			{
+				"CoreUObject",
+				"Engine",
+				"Slate",
+				"SlateCore",
+				"Projects",
+				"MeshDescription",
+				"StaticMeshDescription",
+				"RawMesh",
+				"AssetRegistry",
+				"UnrealEd",
+				"AssetTools",
+				"ToolMenus",
+				"Persona",
+				"SkeletalMeshEditor",
+				"AnimationEditor",
+				"UnrealEd",
+				"MaterialEditor",
+				"LevelEditor",
+				"Blutility",
+				"UMGEditor",
+				"MessageLog",
+				"ContentBrowser",
+				"Renderer",
+				// ... add private dependencies that you statically link with here ...
+			}
 		);
 		
 		

@@ -9,6 +9,7 @@
 #include "Misc/UObjectToken.h"
 #include "Logging/TokenizedMessage.h"
 #include "Logging/MessageLog.h"
+#include "Logging/DisplayNameUtils.h"
 #include "AssetToolsModule.h"
 #include "IAssetTools.h"
 #include "Factories/MaterialInstanceConstantFactoryNew.h"
@@ -27,6 +28,11 @@
 #include "Components/SkeletalMeshComponent.h"
 #include "Engine/SkeletalMesh.h"
 #include "Rendering/SkeletalMeshRenderData.h"
+#include "Editor.h"
+#include "LevelEditorViewport.h"
+#include "SceneView.h"
+#include "AssetRegistry/AssetRegistryModule.h"
+#include "AssetRegistry/AssetData.h"
 #include "Rendering/SkeletalMeshLODRenderData.h"
 #include "Engine/StaticMeshActor.h"
 #include "Engine/DirectionalLight.h"
@@ -55,6 +61,15 @@
 #include "IContentBrowserSingleton.h"
 #include "Engine/Texture2D.h"
 #include "Logging/AssetObjectToken.h"
+#include "Logging/CollisionMessageLogger.h"
+#include "Logging/ShadowMessageLogger.h"
+#include "Components/PrimitiveComponent.h"
+#include "Components/SkinnedMeshComponent.h"
+#include "PrimitiveSceneProxy.h"
+#include "PrimitiveSceneInfo.h"
+#include "RendererInterface.h"
+#include "RenderingThread.h"
+#include "StaticMeshBatch.h"
 
 
 #define LOCTEXT_NAMESPACE "FEditorToolsBPFLibrary"
@@ -66,6 +81,179 @@ namespace
 		return nullptr;
 	}
 }
+
+#if WITH_EDITOR
+namespace
+{
+	static bool DisableCollisionForActors(const TArray<TWeakObjectPtr<AStaticMeshActor>>& Actors, TArray<FDisableCollisionActorRecord>& OutRecords)
+	{
+		OutRecords.Reset();
+
+		TArray<TWeakObjectPtr<AStaticMeshActor>> ValidActors;
+		for (const TWeakObjectPtr<AStaticMeshActor>& WeakActor : Actors)
+		{
+			if (WeakActor.IsValid())
+			{
+				ValidActors.Add(WeakActor);
+			}
+		}
+
+		if (ValidActors.Num() == 0)
+		{
+			return false;
+		}
+
+		const FScopedTransaction Transaction(LOCTEXT("DisableCollisionTransaction", "关闭静态网格体碰撞"));
+
+		for (const TWeakObjectPtr<AStaticMeshActor>& WeakActor : ValidActors)
+		{
+			AStaticMeshActor* StaticMeshActor = WeakActor.Get();
+			if (!IsValid(StaticMeshActor))
+			{
+				continue;
+			}
+
+			if (UStaticMeshComponent* MeshComp = StaticMeshActor->GetStaticMeshComponent())
+			{
+				if (MeshComp->GetCollisionEnabled() == ECollisionEnabled::NoCollision)
+				{
+					continue;
+				}
+
+				FDisableCollisionActorRecord& Record = OutRecords.AddDefaulted_GetRef();
+				Record.Actor = StaticMeshActor;
+				Record.ActorLabel = StaticMeshActor->GetActorLabel();
+				Record.PreviousProfile = MeshComp->GetCollisionProfileName();
+				Record.bGeneratedOverlap = MeshComp->GetGenerateOverlapEvents();
+
+				StaticMeshActor->Modify();
+				MeshComp->Modify();
+				MeshComp->SetCollisionProfileName(UCollisionProfile::NoCollision_ProfileName);
+				MeshComp->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+				MeshComp->SetGenerateOverlapEvents(false);
+				MeshComp->SetNotifyRigidBodyCollision(false);
+				MeshComp->UpdateCollisionProfile();
+				MeshComp->MarkRenderStateDirty();
+				StaticMeshActor->ReregisterAllComponents();
+			}
+		}
+
+		if (OutRecords.Num() > 0 && GEditor)
+		{
+			GEditor->RedrawAllViewports();
+		}
+
+		return OutRecords.Num() > 0;
+	}
+
+	static bool DisableShadowCastingForActors(const TArray<TWeakObjectPtr<AStaticMeshActor>>& Actors, TArray<FDisableShadowActorRecord>& OutRecords)
+	{
+		OutRecords.Reset();
+
+		TArray<TWeakObjectPtr<AStaticMeshActor>> ValidActors;
+		for (const TWeakObjectPtr<AStaticMeshActor>& WeakActor : Actors)
+		{
+			if (WeakActor.IsValid())
+			{
+				ValidActors.Add(WeakActor);
+			}
+		}
+
+		if (ValidActors.Num() == 0)
+		{
+			return false;
+		}
+
+		const FScopedTransaction Transaction(LOCTEXT("DisableShadowTransaction", "关闭静态网格体阴影"));
+
+		for (const TWeakObjectPtr<AStaticMeshActor>& WeakActor : ValidActors)
+		{
+			AStaticMeshActor* StaticMeshActor = WeakActor.Get();
+			if (!IsValid(StaticMeshActor))
+			{
+				continue;
+			}
+
+			if (UStaticMeshComponent* MeshComp = StaticMeshActor->GetStaticMeshComponent())
+			{
+				if (!MeshComp->CastShadow)
+				{
+					continue;
+				}
+
+				FDisableShadowActorRecord& Record = OutRecords.AddDefaulted_GetRef();
+				Record.Actor = StaticMeshActor;
+				Record.ActorLabel = StaticMeshActor->GetActorLabel();
+				Record.bPreviousCastShadow = MeshComp->CastShadow;
+
+				StaticMeshActor->Modify();
+				MeshComp->Modify();
+				MeshComp->SetCastShadow(false);
+				MeshComp->MarkRenderStateDirty();
+				StaticMeshActor->ReregisterAllComponents();
+			}
+		}
+
+		if (OutRecords.Num() > 0 && GEditor)
+		{
+			GEditor->RedrawAllViewports();
+		}
+
+		return OutRecords.Num() > 0;
+	}
+}
+#endif
+
+#if WITH_EDITOR
+namespace
+{
+	struct FActorDrawCallRenderRequest
+	{
+		FActorDrawCallInfo* TargetInfo = nullptr;
+		TArray<FPrimitiveSceneProxy*> SceneProxies;
+	};
+
+	static FString BuildMeshTypeLabel(const AActor* Actor)
+	{
+		if (!IsValid(Actor))
+		{
+			return TEXT("");
+		}
+
+		if (Actor->FindComponentByClass<USkinnedMeshComponent>())
+		{
+			return TEXT("骨骼网格体");
+		}
+
+		if (Actor->FindComponentByClass<UStaticMeshComponent>())
+		{
+			return TEXT("静态网格体");
+		}
+
+		return TEXT("蓝图类");
+	}
+
+	static bool ShouldIncludePrimitiveComponent(const UPrimitiveComponent* PrimComp, float RecentlyRenderedThreshold)
+	{
+		if (!IsValid(PrimComp))
+		{
+			return false;
+		}
+
+		if (!PrimComp->IsRegistered() || !PrimComp->IsVisible() || PrimComp->bHiddenInGame)
+		{
+			return false;
+		}
+
+		if (RecentlyRenderedThreshold > 0.f && !PrimComp->WasRecentlyRendered(RecentlyRenderedThreshold))
+		{
+			return false;
+		}
+
+		return true;
+	}
+}
+#endif
 
 TArray<UMaterialInterface*> UEditorToolsBPFLibrary::GetStaticMeshMaterials(UStaticMesh* StaticMesh)
 {
@@ -743,7 +931,7 @@ TArray<FActorLightingInfo> UEditorToolsBPFLibrary::GetActorsWithInvalidLighting(
 		if (bIncludeOnlyStatic && LightingInfo.BuildStatus == ELightingBuildStatus::Movable)
 		{
 			continue;
-		}
+	}
 
 		// 如果光照状态不是有效的，添加到列表
 		if (LightingInfo.BuildStatus != ELightingBuildStatus::Valid && 
@@ -791,7 +979,7 @@ TArray<FActorLightingInfo> UEditorToolsBPFLibrary::GetActorsWithInvalidLighting(
 
 		// 详细列表标题
 		if (ActorsWithInvalidLighting.Num() > 0)
-		{
+	{
 			MessageLogListing->AddMessage(
 				FTokenizedMessage::Create(
 					EMessageSeverity::Warning,
@@ -800,27 +988,33 @@ TArray<FActorLightingInfo> UEditorToolsBPFLibrary::GetActorsWithInvalidLighting(
 			);
 		}
 		
-		// 计算对齐信息
+		// 计算对齐信息：名称固定为11个字符
 		const int32 RankWidth = FString::FromInt(ActorsWithInvalidLighting.Num()).Len();
-		int32 MaxNameLen = 0;
-		for (const FActorLightingInfo& InfoForWidth : ActorsWithInvalidLighting)
-		{
-			MaxNameLen = FMath::Max(MaxNameLen, InfoForWidth.ActorName.Len());
-		}
 
 		// 详细列表
 		for (int32 Rank = 0; Rank < ActorsWithInvalidLighting.Num(); ++Rank)
-		{
+	{
 			const FActorLightingInfo& LightingInfo = ActorsWithInvalidLighting[Rank];
+
+			auto BuildStatusLabel = [](const FString& Source) -> FString
+			{
+				const int32 LabelWidth = 5;
+				FString Padded = Source;
+				if (Padded.Len() < LabelWidth)
+				{
+					Padded += FString::ChrN(LabelWidth - Padded.Len(), TEXT(' '));
+				}
+				return FString::Printf(TEXT("[%s]"), *Padded);
+			};
 
 			FString StatusText;
 			switch (LightingInfo.BuildStatus)
-			{
-			case ELightingBuildStatus::NeedRebuild:	StatusText = TEXT("[需要重建]"); break;
-			case ELightingBuildStatus::NoLightmap:	StatusText = TEXT("[无光照贴图]"); break;
-			case ELightingBuildStatus::InvalidSettings: StatusText = TEXT("[设置无效]"); break;
-			case ELightingBuildStatus::Movable:		StatusText = TEXT("[可移动]"); break;
-			default:								StatusText = TEXT("[未知问题]"); break;
+		{
+			case ELightingBuildStatus::NeedRebuild:		StatusText = BuildStatusLabel(TEXT("需要重建")); break;
+			case ELightingBuildStatus::NoLightmap:		StatusText = BuildStatusLabel(TEXT("无光照贴图")); break;
+			case ELightingBuildStatus::InvalidSettings:	StatusText = BuildStatusLabel(TEXT("设置无效")); break;
+			case ELightingBuildStatus::Movable:			StatusText = BuildStatusLabel(TEXT("可移动")); break;
+			default:									StatusText = BuildStatusLabel(TEXT("未知问题")); break;
 			}
 
 			// 左侧序号
@@ -838,30 +1032,24 @@ TArray<FActorLightingInfo> UEditorToolsBPFLibrary::GetActorsWithInvalidLighting(
 				FText::FromString(FString::Printf(TEXT("#%s. %s "), *RankStr, *StatusText))
 			);
 
-			// 可点击的Actor链接（名称左对齐，右填充到最大宽度）
-			FString PaddedName = LightingInfo.ActorName;
-			if (PaddedName.Len() < MaxNameLen)
-			{
-				PaddedName += FString::ChrN(MaxNameLen - PaddedName.Len(), TEXT(' '));
-			}
+			const FString DisplayName = EditorTools::BuildFixedDisplayName(LightingInfo.ActorName);
+			const FText DisplayText = FText::FromString(DisplayName);
+
 			if (LightingInfo.Actor)
 			{
 				Message->AddToken(FImageToken::Create(TEXT("Icons.Search")));
-                Message->AddToken(FActorSelectToken::Create(LightingInfo.Actor, FText::FromString(PaddedName)));
+				Message->AddToken(FActorSelectToken::Create(LightingInfo.Actor, DisplayText));
 			}
 			else
 			{
-				Message->AddToken(FTextToken::Create(FText::FromString(PaddedName)));
+				Message->AddToken(FTextToken::Create(DisplayText));
 			}
 
 			// 追加详情：类型 | 位置 | 组件统计 | 问题描述
 			const FString ActorClass = LightingInfo.Actor ? LightingInfo.Actor->GetClass()->GetName() : TEXT("未知");
-			const FVector ActorLocation = LightingInfo.Actor ? LightingInfo.Actor->GetActorLocation() : FVector::ZeroVector;
-			const FString LocationText = FString::Printf(TEXT("(X=%.0f, Y=%.0f, Z=%.0f)"), ActorLocation.X, ActorLocation.Y, ActorLocation.Z);
 			const FString DetailText = FString::Printf(
-				TEXT(" [%s] %s | 组件:%d(有问题:%d)%s"),
+				TEXT(" [%s] 组件:%d(有问题:%d)%s"),
 				*ActorClass,
-				*LocationText,
 				LightingInfo.StaticMeshComponentCount,
 				LightingInfo.ProblematicComponentCount,
 				LightingInfo.Description.IsEmpty() ? TEXT("") : *FString::Printf(TEXT(" | %s"), *LightingInfo.Description)
@@ -893,7 +1081,7 @@ TArray<FActorLightingInfo> UEditorToolsBPFLibrary::GetActorsWithInvalidLighting(
 
 
 
-TArray<FActorMeshComplexityInfo> UEditorToolsBPFLibrary::GetHighPolyActorsInScene(UObject* WorldContextObject, int32 TriangleThreshold, bool bOnlyStaticMeshActors)
+TArray<FActorMeshComplexityInfo> UEditorToolsBPFLibrary::GetHighPolyActorsInScene(UObject* WorldContextObject, int32 TriangleThreshold)
 {
 	TArray<FActorMeshComplexityInfo> HighPolyActors;
 
@@ -920,16 +1108,6 @@ TArray<FActorMeshComplexityInfo> UEditorToolsBPFLibrary::GetHighPolyActorsInScen
 		if (!Actor)
 		{
 			continue;
-		}
-
-		// 如果只检查纯静态网格体Actor，过滤掉其他类型
-		if (bOnlyStaticMeshActors)
-		{
-			// 只接受精确的AStaticMeshActor类，不包含蓝图派生类
-			if (Actor->GetClass() != AStaticMeshActor::StaticClass())
-			{
-				continue;
-			}
 		}
 
 		FActorMeshComplexityInfo ComplexityInfo;
@@ -1145,11 +1323,10 @@ TArray<FActorMeshComplexityInfo> UEditorToolsBPFLibrary::GetHighPolyActorsInScen
 		MessageLogListing->ClearMessages();
 
 		// 添加标题
-	FString FilterModeText = bOnlyStaticMeshActors ? TEXT("[仅纯静态网格体]") : TEXT("[所有网格体]");
 		MessageLogListing->AddMessage(
 			FTokenizedMessage::Create(
 				EMessageSeverity::Info,
-				FText::Format(LOCTEXT("HighPolyHeader", "------------------ 场景多边形统计 {0} ------------------"), FText::FromString(FilterModeText))
+				LOCTEXT("HighPolyHeader", "------------------ 场景多边形统计 ------------------")
 			)
 		);
 
@@ -1181,15 +1358,10 @@ TArray<FActorMeshComplexityInfo> UEditorToolsBPFLibrary::GetHighPolyActorsInScen
 		// 添加详细列表
 	if (HighPolyActors.Num() > 0)
 	{
-			// 预计算列宽：序号宽度与名称宽度，便于对齐显示
+			// 预计算列宽：序号宽度，名称固定为11个字符
 			const int32 RankWidth = FString::FromInt(HighPolyActors.Num()).Len();
-			int32 MaxNameLen = 0;
-			for (const FActorMeshComplexityInfo& InfoForWidth : HighPolyActors)
-			{
-				MaxNameLen = FMath::Max(MaxNameLen, InfoForWidth.ActorName.Len());
-			}
 
-			SeparatorLen = FMath::Clamp(RankWidth + MaxNameLen + 50, 60, 120);
+			SeparatorLen = FMath::Clamp(RankWidth + 11 + 50, 60, 120);
 			FooterSeparator = FString::ChrN(SeparatorLen, TEXT('-'));
 
 			MessageLogListing->AddMessage(
@@ -1202,21 +1374,6 @@ TArray<FActorMeshComplexityInfo> UEditorToolsBPFLibrary::GetHighPolyActorsInScen
 		for (int32 Rank = 0; Rank < HighPolyActors.Num(); ++Rank)
 		{
 			const FActorMeshComplexityInfo& ComplexityInfo = HighPolyActors[Rank];
-
-				// 确定网格体类型
-			FString MeshTypeText;
-			if (ComplexityInfo.MeshType == EMeshType::SkeletalMesh)
-			{
-				MeshTypeText = TEXT("骨骼网格体");
-			}
-				else if (ComplexityInfo.Actor && ComplexityInfo.Actor->GetClass() == AStaticMeshActor::StaticClass())
-				{
-					MeshTypeText = TEXT("静态网格体");
-				}
-				else
-				{
-					MeshTypeText = TEXT("蓝图类");
-				}
 
 				// 获取LOD信息
 				int32 LODCount = ComplexityInfo.TotalLODCount;
@@ -1238,7 +1395,7 @@ TArray<FActorMeshComplexityInfo> UEditorToolsBPFLibrary::GetHighPolyActorsInScen
 					}
 				}
 				else if (LODCount == 1)
-				{
+			{
 					// 只有一个LOD，就是LOD0
 					LODNTriangles = LOD0Triangles;
 					LODNIndex = 0;
@@ -1248,12 +1405,6 @@ TArray<FActorMeshComplexityInfo> UEditorToolsBPFLibrary::GetHighPolyActorsInScen
 				FString FormattedLOD0 = FText::AsNumber(LOD0Triangles).ToString();
 				FString FormattedLODN = FText::AsNumber(LODNTriangles).ToString();
 				
-				// 构建位置信息
-				FString LocationText = FString::Printf(TEXT("(X=%.0f, Y=%.0f, Z=%.0f)"), 
-					ComplexityInfo.ActorLocation.X, 
-					ComplexityInfo.ActorLocation.Y, 
-					ComplexityInfo.ActorLocation.Z);
-
 				// 构建LOD信息文本
 				FString LODInfoText;
 				if (LODCount > 1)
@@ -1270,49 +1421,39 @@ TArray<FActorMeshComplexityInfo> UEditorToolsBPFLibrary::GetHighPolyActorsInScen
 				float Multiplier = (float)LOD0Triangles / (float)TriangleThreshold;
 				
 			// 根据倍数确定严重程度和颜色，直接内联使用
-			// 创建可点击的消息（左侧序号按列宽对齐，序号后显示类型）
+			// 创建可点击的消息（左侧序号按列宽对齐）
 			FString RankStr = FString::FromInt(Rank + 1);
 			// 单个数字时 # 和数字之间有空格，多个数字时没有空格
 			// 对于单个数字，先添加空格，然后进行左填充；对于多个数字，直接左填充
 			if ((Rank + 1) < 10)
 	{
 				RankStr = FString::Printf(TEXT(" %s"), *RankStr);
-		}
+			}
 			RankStr = RankStr.LeftPad(RankWidth);
 			TSharedRef<FTokenizedMessage> Message = FTokenizedMessage::Create(
 				EMessageSeverity::Warning,
-				FText::FromString(FString::Printf(TEXT("#%s. [%s] "), *RankStr, *MeshTypeText))
+				FText::FromString(FString::Printf(TEXT("#%s. "), *RankStr))
 			);
 
-			// 添加可点击的Actor链接
+			const FString DisplayName = EditorTools::BuildFixedDisplayName(ComplexityInfo.ActorName);
+			const FText DisplayText = FText::FromString(DisplayName);
+			
 			if (ComplexityInfo.Actor)
 			{
-				// 使用自定义的 FActorSelectToken，只选中Actor，不移动摄像机
-				// 名称左对齐，右填充到最大宽度，保证后续列对齐
-				FString PaddedName = ComplexityInfo.ActorName;
-				if (PaddedName.Len() < MaxNameLen)
-				{
-					PaddedName += FString::ChrN(MaxNameLen - PaddedName.Len(), TEXT(' '));
-			}
 				Message->AddToken(FImageToken::Create(TEXT("Icons.Search")));
 				Message->AddToken(FActorSelectToken::Create(
 					ComplexityInfo.Actor,
-					FText::FromString(PaddedName)
+					DisplayText
 				));
 			}
 			else
 			{
-				FString PaddedName = ComplexityInfo.ActorName;
-				if (PaddedName.Len() < MaxNameLen)
-				{
-					PaddedName += FString::ChrN(MaxNameLen - PaddedName.Len(), TEXT(' '));
-				}
-				Message->AddToken(FTextToken::Create(FText::FromString(PaddedName)));
+				Message->AddToken(FTextToken::Create(DisplayText));
 			}
 
-			// 添加详细信息（已移除类型，因为已在序号后显示）
-			FString DetailText = FString::Printf(TEXT(" %s | %s | %.1fx阈值"), 
-				*LocationText, *LODInfoText, Multiplier);
+			// 添加详细信息（已移除类型和位置信息，因为已在序号后显示类型）
+			FString DetailText = FString::Printf(TEXT(" %s | %.1fx阈值"), 
+				*LODInfoText, Multiplier);
 			Message->AddToken(FTextToken::Create(FText::FromString(DetailText)));
 
 				MessageLogListing->AddMessage(Message);
@@ -1333,6 +1474,247 @@ TArray<FActorMeshComplexityInfo> UEditorToolsBPFLibrary::GetHighPolyActorsInScen
 #endif
 
 	return HighPolyActors;
+}
+
+TArray<FActorMaterialSlotInfo> UEditorToolsBPFLibrary::GetActorsMaterialSlotsInScene(UObject* WorldContextObject, int32 MaterialSlotThreshold)
+{
+	TArray<FActorMaterialSlotInfo> ActorsWithMaterialSlots;
+
+	if (!WorldContextObject)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("GetActorsMaterialSlotsInScene: WorldContextObject is null"));
+		return ActorsWithMaterialSlots;
+	}
+
+	UWorld* World = WorldContextObject->GetWorld();
+	if (!World)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("GetActorsMaterialSlotsInScene: Failed to get World from context"));
+		return ActorsWithMaterialSlots;
+	}
+
+	int32 TotalActorsChecked = 0;
+	int32 ActorsWithMaterialSlotsCount = 0;
+
+	// 遍历世界中的所有Actor
+	for (TActorIterator<AActor> It(World); It; ++It)
+	{
+		AActor* Actor = *It;
+		if (!Actor)
+		{
+			continue;
+		}
+
+		FActorMaterialSlotInfo MaterialSlotInfo;
+		MaterialSlotInfo.Actor = Actor;
+		MaterialSlotInfo.ActorLocation = Actor->GetActorLocation();
+		MaterialSlotInfo.ActorClass = Actor->GetClass()->GetName();
+
+#if WITH_EDITOR
+		MaterialSlotInfo.ActorName = Actor->GetActorLabel();
+#else
+		MaterialSlotInfo.ActorName = Actor->GetName();
+#endif
+
+		int32 TotalMaterialSlots = 0;
+		bool bHasMesh = false;
+
+		// ============ 检查静态网格体组件 ============
+		TArray<UStaticMeshComponent*> StaticMeshComponents;
+		Actor->GetComponents<UStaticMeshComponent>(StaticMeshComponents);
+
+		if (StaticMeshComponents.Num() > 0)
+		{
+			bHasMesh = true;
+			// 判断是纯静态网格体还是蓝图类
+			if (Actor->GetClass() == AStaticMeshActor::StaticClass())
+			{
+				MaterialSlotInfo.MeshType = EMeshType::StaticMesh;
+			}
+			else
+			{
+				// 蓝图类或其他派生类
+				MaterialSlotInfo.MeshType = EMeshType::StaticMesh;
+			}
+			MaterialSlotInfo.ComponentCount = StaticMeshComponents.Num();
+
+			for (UStaticMeshComponent* MeshComp : StaticMeshComponents)
+			{
+				if (!MeshComp || !MeshComp->GetStaticMesh())
+				{
+					continue;
+				}
+
+				UStaticMesh* StaticMesh = MeshComp->GetStaticMesh();
+				const TArray<FStaticMaterial>& StaticMaterials = StaticMesh->GetStaticMaterials();
+				TotalMaterialSlots += StaticMaterials.Num();
+			}
+		}
+
+		// ============ 检查骨骼网格体组件 ============
+		TArray<USkeletalMeshComponent*> SkeletalMeshComponents;
+		Actor->GetComponents<USkeletalMeshComponent>(SkeletalMeshComponents);
+
+		if (SkeletalMeshComponents.Num() > 0)
+		{
+			bHasMesh = true;
+			MaterialSlotInfo.MeshType = EMeshType::SkeletalMesh;
+			MaterialSlotInfo.ComponentCount = SkeletalMeshComponents.Num();
+
+			for (USkeletalMeshComponent* SkelMeshComp : SkeletalMeshComponents)
+			{
+				if (!SkelMeshComp || !SkelMeshComp->GetSkeletalMeshAsset())
+				{
+					continue;
+				}
+
+				USkeletalMesh* SkeletalMesh = SkelMeshComp->GetSkeletalMeshAsset();
+				if (SkeletalMesh)
+				{
+					// 获取骨骼网格体的材质插槽数量
+					const TArray<FSkeletalMaterial>& SkeletalMaterials = SkeletalMesh->GetMaterials();
+					TotalMaterialSlots += SkeletalMaterials.Num();
+				}
+			}
+		}
+
+		// 如果有网格体且材质插槽数量超过阈值
+		if (bHasMesh && TotalMaterialSlots >= MaterialSlotThreshold)
+			{
+			TotalActorsChecked++;
+			MaterialSlotInfo.MaterialSlotCount = TotalMaterialSlots;
+
+			ActorsWithMaterialSlots.Add(MaterialSlotInfo);
+			ActorsWithMaterialSlotsCount++;
+		}
+	}
+
+	// 按照材质插槽数量从高到低排序
+	ActorsWithMaterialSlots.Sort([](const FActorMaterialSlotInfo& A, const FActorMaterialSlotInfo& B)
+	{
+		return A.MaterialSlotCount > B.MaterialSlotCount;
+	});
+
+#if WITH_EDITOR
+	// 使用消息日志输出
+	FMessageLogModule& MessageLogModule = FModuleManager::LoadModuleChecked<FMessageLogModule>("MessageLog");
+	TSharedPtr<IMessageLogListing> MessageLogListing = MessageLogModule.GetLogListing(FEditorToolsMessageLog::MessageLogName);
+	
+	if (!MessageLogListing.IsValid())
+	{
+		FEditorToolsMessageLog::Initialize();
+		MessageLogListing = MessageLogModule.GetLogListing(FEditorToolsMessageLog::MessageLogName);
+	}
+
+	if (MessageLogListing.IsValid())
+	{
+		// 清空之前的消息
+		MessageLogListing->ClearMessages();
+
+		// 添加标题
+		MessageLogListing->AddMessage(
+			FTokenizedMessage::Create(
+				EMessageSeverity::Info,
+				LOCTEXT("MaterialSlotHeader", "------------------ 场景材质插槽统计 ------------------")
+			)
+		);
+
+		// 添加统计信息
+		MessageLogListing->AddMessage(
+			FTokenizedMessage::Create(
+				EMessageSeverity::Info,
+				FText::Format(LOCTEXT("MaterialSlotStats", "检查了 {0} 个网格体Actor，发现 {1} 个超过 {2} 个材质插槽的Actor"), 
+					FText::AsNumber(TotalActorsChecked),
+					FText::AsNumber(ActorsWithMaterialSlotsCount),
+					FText::AsNumber(MaterialSlotThreshold))
+			)
+		);
+
+		int32 SeparatorLen = 80;
+		FString FooterSeparator = FString::ChrN(SeparatorLen, TEXT('-'));
+
+		// 添加详细列表
+		if (ActorsWithMaterialSlots.Num() > 0)
+		{
+			// 预计算列宽：序号宽度，名称固定为11个字符
+			const int32 RankWidth = FString::FromInt(ActorsWithMaterialSlots.Num()).Len();
+
+			SeparatorLen = FMath::Clamp(RankWidth + 11 + 50, 60, 120);
+			FooterSeparator = FString::ChrN(SeparatorLen, TEXT('-'));
+
+			MessageLogListing->AddMessage(
+				FTokenizedMessage::Create(
+					EMessageSeverity::Warning,
+					LOCTEXT("MaterialSlotListHeader", "详细Actor列表（按材质插槽数量从高到低，点击可定位）：")
+				)
+			);
+
+			for (int32 Rank = 0; Rank < ActorsWithMaterialSlots.Num(); ++Rank)
+		{
+				const FActorMaterialSlotInfo& MaterialSlotInfo = ActorsWithMaterialSlots[Rank];
+
+				// 构建组件和材质插槽信息
+				FString ComponentText = FString::Printf(TEXT("组件数:%d | 材质插槽数:%d"), 
+					MaterialSlotInfo.ComponentCount, 
+					MaterialSlotInfo.MaterialSlotCount);
+
+				// 确定严重程度：2个及以上材质插槽用黄色感叹号（Warning）
+				EMessageSeverity::Type Severity = (MaterialSlotInfo.MaterialSlotCount >= 2) 
+					? EMessageSeverity::Warning 
+					: EMessageSeverity::Info;
+
+				// 创建序号字符串（格式：# 1. 或 #10.）
+				FString RankStr = FString::FromInt(Rank + 1);
+				if (RankStr.Len() == 1)
+	{
+					// 单个数字，前面加空格
+					RankStr = FString::Printf(TEXT(" %s"), *RankStr);
+				}
+				RankStr = RankStr.LeftPad(RankWidth);
+
+				TSharedRef<FTokenizedMessage> Message = FTokenizedMessage::Create(
+					Severity,
+					FText::FromString(FString::Printf(TEXT("#%s. "), *RankStr))
+				);
+
+				const FString DisplayName = EditorTools::BuildFixedDisplayName(MaterialSlotInfo.ActorName);
+				const FText DisplayText = FText::FromString(DisplayName);
+				
+				if (MaterialSlotInfo.Actor)
+				{
+					Message->AddToken(FImageToken::Create(TEXT("Icons.Search")));
+					Message->AddToken(FActorSelectToken::Create(
+						MaterialSlotInfo.Actor,
+						DisplayText
+					));
+				}
+				else
+				{
+					Message->AddToken(FTextToken::Create(DisplayText));
+				}
+
+				// 添加详细信息
+				FString DetailText = FString::Printf(TEXT(" %s"), *ComponentText);
+				Message->AddToken(FTextToken::Create(FText::FromString(DetailText)));
+
+				MessageLogListing->AddMessage(Message);
+			}
+		}
+
+		// 添加结束分隔线
+		MessageLogListing->AddMessage(
+			FTokenizedMessage::Create(
+				EMessageSeverity::Info,
+				FText::FromString(FooterSeparator)
+			)
+		);
+
+		// 打开消息日志窗口
+		MessageLogModule.OpenMessageLog(FEditorToolsMessageLog::MessageLogName);
+		}
+#endif
+
+	return ActorsWithMaterialSlots;
 }
 
 FSceneLightStatistics UEditorToolsBPFLibrary::GetSceneLightStatistics(UObject* WorldContextObject)
@@ -1511,27 +1893,22 @@ FSceneLightStatistics UEditorToolsBPFLibrary::GetSceneLightStatistics(UObject* W
 			);
 		}
 
-		// 预计算宽度
+		// 预计算宽度：名称固定为11个字符
 		const int32 RankWidth = FString::FromInt(Statistics.LightInfoList.Num()).Len();
-		int32 MaxNameLen = 0;
-		for (const FLightActorInfo& InfoForWidth : Statistics.LightInfoList)
-		{
-			MaxNameLen = FMath::Max(MaxNameLen, InfoForWidth.LightName.Len());
-		}
 		// 列表
 		for (int32 Rank = 0; Rank < Statistics.LightInfoList.Num(); ++Rank)
 	{
-			const FLightActorInfo& Info = Statistics.LightInfoList[Rank];
+		const FLightActorInfo& Info = Statistics.LightInfoList[Rank];
 
-			// 左侧序号
-			FString RankStr = FString::FromInt(Rank + 1);
-			// 单个数字时 # 和数字之间有空格，多个数字时没有空格
-			// 对于单个数字，先添加空格，然后进行左填充；对于多个数字，直接左填充
-			if ((Rank + 1) < 10)
-			{
-				RankStr = FString::Printf(TEXT(" %s"), *RankStr);
-			}
-			RankStr = RankStr.LeftPad(RankWidth);
+		// 左侧序号
+		FString RankStr = FString::FromInt(Rank + 1);
+		// 1-99时 # 和数字之间有空格，三位数及以上时没有空格
+		// 对于1-99，先添加空格，然后进行左填充；对于三位数及以上，直接左填充
+		if ((Rank + 1) < 100)
+		{
+			RankStr = FString::Printf(TEXT(" %s"), *RankStr);
+		}
+		RankStr = RankStr.LeftPad(RankWidth);
 
 			// 严重级别：动态光为警告，其余信息
 			const EMessageSeverity::Type Severity = (Info.MobilityType == ELightMobilityType::Movable)
@@ -1540,30 +1917,25 @@ FSceneLightStatistics UEditorToolsBPFLibrary::GetSceneLightStatistics(UObject* W
 
 			TSharedRef<FTokenizedMessage> Message = FTokenizedMessage::Create(
 				Severity,
-				FText::FromString(FString::Printf(TEXT("#%s. [%s] "), *RankStr, *Info.MobilityText))
+				FText::FromString(FString::Printf(TEXT("#%s.[%s] "), *RankStr, *Info.MobilityText))
 			);
 
-			// 可点击名称（名称左对齐，右填充到最大宽度）
-			FString PaddedName = Info.LightName;
-			if (PaddedName.Len() < MaxNameLen)
-			{
-				PaddedName += FString::ChrN(MaxNameLen - PaddedName.Len(), TEXT(' '));
-			}
+			const FString DisplayName = EditorTools::BuildFixedDisplayName(Info.LightName);
+			const FText DisplayText = FText::FromString(DisplayName);
 			if (Info.LightActor)
 			{
 				Message->AddToken(FImageToken::Create(TEXT("Icons.Search")));
-				Message->AddToken(FActorSelectToken::Create(Info.LightActor, FText::FromString(PaddedName)));
+				Message->AddToken(FActorSelectToken::Create(Info.LightActor, DisplayText));
 			}
 			else
 			{
-				Message->AddToken(FTextToken::Create(FText::FromString(PaddedName)));
+				Message->AddToken(FTextToken::Create(DisplayText));
 			}
 
 			// 详情
-			const FString LocationText = FString::Printf(TEXT("(%.0f, %.0f, %.0f)"), Info.Location.X, Info.Location.Y, Info.Location.Z);
 			const FString EnabledText = Info.bIsEnabled ? TEXT("✓启用") : TEXT("✗禁用");
-			const FString DetailText = FString::Printf(TEXT(" - %s | %s | 强度:%.1f | %s"),
-				*Info.LightTypeText, *LocationText, Info.Intensity, *EnabledText);
+			const FString DetailText = FString::Printf(TEXT(" - %s | 强度:%.1f | %s"),
+				*Info.LightTypeText, Info.Intensity, *EnabledText);
 			Message->AddToken(FTextToken::Create(FText::FromString(DetailText)));
 
 			MessageLogListing->AddMessage(Message);
@@ -1992,6 +2364,9 @@ TArray<AStaticMeshActor*> UEditorToolsBPFLibrary::GetAllStaticMeshActorsInScene(
 
 		if (CollisionEnabledActors.Num() > 0)
 		{
+			TWeakPtr<IMessageLogListing> MessageLogListingWeak = MessageLogListing;
+			TWeakObjectPtr<UObject> WorldContextWeak = WorldContextObject;
+
 			MessageLogListing->AddMessage(
 				FTokenizedMessage::Create(
 					EMessageSeverity::Info,
@@ -2005,23 +2380,50 @@ TArray<AStaticMeshActor*> UEditorToolsBPFLibrary::GetAllStaticMeshActorsInScene(
 			});
 
 			int32 Index = 1;
+			const int32 RankWidth = FString::FromInt(CollisionEnabledActors.Num()).Len();
+
 			for (const FStaticMeshCollisionInfo& Info : CollisionEnabledActors)
 			{
 				AStaticMeshActor* Actor = Info.Actor.Get();
 				if (Actor)
 				{
-					// 单个数字时 # 和数字之间有空格，多个数字时没有空格
-					int32 CurrentIndex = Index++;
-					FString IndexPrefix = (CurrentIndex < 10) ? TEXT("# ") : TEXT("#");
-					FString IndexText = FString::Printf(TEXT("%s%d. "), *IndexPrefix, CurrentIndex);
-					
+					const int32 CurrentIndex = Index++;
+					FString RankStr = FString::FromInt(CurrentIndex);
+					if (CurrentIndex < 10)
+					{
+						RankStr = FString::Printf(TEXT(" %s"), *RankStr);
+					}
+					RankStr = RankStr.LeftPad(RankWidth);
+
+					FString MeshTypeText;
+					if (Actor->FindComponentByClass<USkeletalMeshComponent>())
+					{
+						MeshTypeText = TEXT("骨骼网格体");
+					}
+					else if (Actor->IsA(AStaticMeshActor::StaticClass()))
+					{
+						MeshTypeText = TEXT("静态网格体");
+					}
+					else
+					{
+						MeshTypeText = TEXT("蓝图类");
+					}
+
+					constexpr int32 MeshTypeDisplayLen = 5;
+					if (MeshTypeText.Len() < MeshTypeDisplayLen)
+					{
+						MeshTypeText += FString::ChrN(MeshTypeDisplayLen - MeshTypeText.Len(), TEXT(' '));
+					}
+
 					TSharedRef<FTokenizedMessage> Message = FTokenizedMessage::Create(
 						EMessageSeverity::Info,
-						FText::FromString(IndexText)
+						FText::FromString(FString::Printf(TEXT("#%s. [%s] "), *RankStr, *MeshTypeText))
 					);
 
 					Message->AddToken(FImageToken::Create(TEXT("Icons.Search")));
-					Message->AddToken(FActorSelectToken::Create(Actor, FText::FromString(Info.ActorLabel)));
+					const FString DisplayName = EditorTools::BuildFixedDisplayName(Info.ActorLabel);
+					const FText DisplayText = FText::FromString(DisplayName);
+					Message->AddToken(FActorSelectToken::Create(Actor, DisplayText));
 
 					if (Info.CollisionProfileName != NAME_None)
 					{
@@ -2033,7 +2435,7 @@ TArray<AStaticMeshActor*> UEditorToolsBPFLibrary::GetAllStaticMeshActorsInScene(
 								)
 							)
 						);
-					}
+		}
 
 					if (Info.bGenerateOverlapEvents)
 					{
@@ -2045,6 +2447,51 @@ TArray<AStaticMeshActor*> UEditorToolsBPFLibrary::GetAllStaticMeshActorsInScene(
 					}
 
 					Message->AddToken(FTextToken::Create(LOCTEXT("StaticMeshCollisionActionHintToken", ">> 可在“详情”中视情况调整碰撞设置")));
+
+					Message->AddToken(
+						FActionToken::Create(
+							LOCTEXT("StaticMeshCollisionDisableAction", "[关闭碰撞]"),
+							LOCTEXT("StaticMeshCollisionDisableActionTooltip", "选中该Actor并关闭碰撞"),
+							FOnActionTokenExecuted::CreateLambda(
+								[WeakActor = TWeakObjectPtr<AStaticMeshActor>(Actor), WorldContextWeak, MessageLogListingWeak]()
+							{
+#if WITH_EDITOR
+								if (GEditor)
+								{
+									GEditor->SelectNone(/*bNoteSelectionChange*/true, /*bDeselectBSPSurfs*/true, /*WarnAboutManyActors*/false);
+									if (AStaticMeshActor* ActorPtr = WeakActor.Get())
+									{
+										GEditor->SelectActor(ActorPtr, /*bInSelected*/true, /*bNotify*/true);
+									}
+								}
+
+								TArray<TWeakObjectPtr<AStaticMeshActor>> ActorsToDisable;
+								ActorsToDisable.Add(WeakActor);
+								TArray<FDisableCollisionActorRecord> DisabledRecords;
+								if (!DisableCollisionForActors(ActorsToDisable, DisabledRecords))
+								{
+									UEditorToolsUtilities::LogWarningToMessageLogAndOpen(
+										LOCTEXT("DisableCollisionInlineFailed", "该静态网格体的碰撞已经处于关闭状态。")
+									);
+									return;
+								}
+
+								if (UObject* ContextObj = WorldContextWeak.Get())
+								{
+									UEditorToolsBPFLibrary::GetAllStaticMeshActorsInScene(ContextObj);
+								}
+
+								TSharedPtr<IMessageLogListing> Listing = MessageLogListingWeak.Pin();
+								if (!Listing.IsValid())
+								{
+									Listing = UEditorToolsUtilities::GetOrCreateMessageLogListing(true);
+								}
+								FCollisionMessageLogger::LogDisableCollisionMessages(Listing, DisabledRecords, DisabledRecords.Num(), false);
+#endif
+							}),
+							true
+						)
+					);
 
 					MessageLogListing->AddMessage(Message);
 		}
@@ -2076,86 +2523,61 @@ TArray<AStaticMeshActor*> UEditorToolsBPFLibrary::GetAllStaticMeshActorsInScene(
 	return Result;
 }
 
-void UEditorToolsBPFLibrary::DisableCollisionForSelectedStaticMeshActors()
+TArray<AStaticMeshActor*> UEditorToolsBPFLibrary::GetAllStaticMeshActorsWithShadowCasting(UObject* WorldContextObject)
 {
+	TArray<AStaticMeshActor*> Result;
+
 #if WITH_EDITOR
-	struct FDisableCollisionActorInfo
+	struct FStaticMeshShadowInfo
 	{
 		TWeakObjectPtr<AStaticMeshActor> Actor;
 		FString ActorLabel;
-		FName PreviousProfile;
-		bool bGeneratedOverlap = false;
+		bool bCastShadow = false;
 	};
 
-	if (!GEditor)
+	UWorld* World = nullptr;
+	if (WorldContextObject)
 	{
-		return;
+		World = WorldContextObject->GetWorld();
 	}
 
-	USelection* SelectedActors = GEditor->GetSelectedActors();
-	if (!SelectedActors || SelectedActors->Num() == 0)
+	if (!World && GEditor)
 	{
-		UEditorToolsUtilities::LogWarningToMessageLogAndOpen(
-			LOCTEXT("DisableCollisionNoSelection", "请先在场景中选择至少一个静态网格体Actor，然后再执行“关闭碰撞”。")
-		);
-		return;
+		World = GEditor->GetEditorWorldContext().World();
 	}
 
-	const int32 TotalSelectedActors = SelectedActors->Num();
-
-	TArray<FDisableCollisionActorInfo> ActorsToUpdate;
-	for (FSelectionIterator It(*SelectedActors); It; ++It)
+	if (!World)
 	{
-		if (AStaticMeshActor* StaticMeshActor = Cast<AStaticMeshActor>(*It))
-		{
-			if (UStaticMeshComponent* MeshComp = StaticMeshActor->GetStaticMeshComponent())
-			{
-				if (MeshComp->GetCollisionEnabled() != ECollisionEnabled::NoCollision)
-				{
-					FDisableCollisionActorInfo& Info = ActorsToUpdate.AddDefaulted_GetRef();
-					Info.Actor = StaticMeshActor;
-					Info.ActorLabel = StaticMeshActor->GetActorLabel();
-					Info.PreviousProfile = MeshComp->GetCollisionProfileName();
-					Info.bGeneratedOverlap = MeshComp->GetGenerateOverlapEvents();
-				}
-			}
-		}
+		return Result;
 	}
 
-	if (ActorsToUpdate.Num() == 0)
+	TArray<FStaticMeshShadowInfo> ShadowCastingActors;
+	for (TActorIterator<AStaticMeshActor> It(World); It; ++It)
 	{
-		UEditorToolsUtilities::LogWarningToMessageLogAndOpen(
-			LOCTEXT("DisableCollisionNoCollisionActors", "所选静态网格体的碰撞已经处于关闭状态。")
-		);
-		return;
-	}
-
-	const FScopedTransaction Transaction(LOCTEXT("DisableCollisionTransaction", "关闭静态网格体碰撞"));
-
-	for (FDisableCollisionActorInfo& Info : ActorsToUpdate)
-	{
-		AStaticMeshActor* StaticMeshActor = Info.Actor.Get();
-		if (!IsValid(StaticMeshActor))
+		AStaticMeshActor* Actor = *It;
+		if (!IsValid(Actor))
 		{
 			continue;
 		}
 
-		StaticMeshActor->Modify();
-
-		if (UStaticMeshComponent* MeshComp = StaticMeshActor->GetStaticMeshComponent())
+		UStaticMeshComponent* MeshComp = Actor->GetStaticMeshComponent();
+		if (!IsValid(MeshComp))
 		{
-			MeshComp->Modify();
-			MeshComp->SetCollisionProfileName(UCollisionProfile::NoCollision_ProfileName);
-			MeshComp->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-			MeshComp->SetGenerateOverlapEvents(false);
-			MeshComp->SetNotifyRigidBodyCollision(false);
-			MeshComp->UpdateCollisionProfile();
-			MeshComp->MarkRenderStateDirty();
-			StaticMeshActor->ReregisterAllComponents();
+			continue;
+		}
+
+		const bool bCastShadow = MeshComp->CastShadow;
+
+		Result.Add(Actor);
+
+		if (bCastShadow)
+		{
+			FStaticMeshShadowInfo& Info = ShadowCastingActors.AddDefaulted_GetRef();
+			Info.Actor = Actor;
+			Info.ActorLabel = Actor->GetActorLabel();
+			Info.bCastShadow = bCastShadow;
 		}
 	}
-
-	GEditor->RedrawAllViewports();
 
 	TSharedPtr<IMessageLogListing> MessageLogListing = UEditorToolsUtilities::GetOrCreateMessageLogListing(true);
 
@@ -2163,68 +2585,143 @@ void UEditorToolsBPFLibrary::DisableCollisionForSelectedStaticMeshActors()
 	{
 		UEditorToolsUtilities::AddInfoMessage(
 			MessageLogListing,
-			LOCTEXT("DisableCollisionHeader", "------------------ 静态网格体碰撞关闭 ------------------")
+			LOCTEXT("StaticMeshShadowHeader", "------------------ 静态网格体阴影检查 ------------------")
 		);
 
 		UEditorToolsUtilities::AddInfoMessage(
 			MessageLogListing,
 			FText::Format(
-				LOCTEXT("DisableCollisionSummary", "选择了 {0} 个 Actor，其中 {1} 个静态网格体碰撞已切换为【无碰撞】："),
-				FText::AsNumber(TotalSelectedActors),
-				FText::AsNumber(ActorsToUpdate.Num())
+				LOCTEXT("StaticMeshShadowSummary", "场景静态网格体总数: {0}，开启投射阴影的数量: {1}"),
+				FText::AsNumber(Result.Num()),
+				FText::AsNumber(ShadowCastingActors.Num())
 			)
 		);
 
-		int32 Index = 1;
-		for (const FDisableCollisionActorInfo& Info : ActorsToUpdate)
+		if (ShadowCastingActors.Num() > 0)
 		{
-			AStaticMeshActor* StaticMeshActor = Info.Actor.Get();
-			if (!IsValid(StaticMeshActor))
-			{
-				continue;
-			}
+			TWeakPtr<IMessageLogListing> MessageLogListingWeak = MessageLogListing;
+			TWeakObjectPtr<UObject> WorldContextWeak = WorldContextObject;
 
-			// 单个数字时 # 和数字之间有空格，多个数字时没有空格
-			int32 CurrentIndex = Index++;
-			FString IndexPrefix = (CurrentIndex < 10) ? TEXT("# ") : TEXT("#");
-			FString IndexText = FString::Printf(TEXT("%s%d. "), *IndexPrefix, CurrentIndex);
-			
-			TSharedRef<FTokenizedMessage> Message = FTokenizedMessage::Create(
-				EMessageSeverity::Info,
-				FText::FromString(IndexText)
+			MessageLogListing->AddMessage(
+				FTokenizedMessage::Create(
+					EMessageSeverity::Info,
+					LOCTEXT("StaticMeshShadowListTitle", "详细列表（按 Actor 名称排序）：")
+				)
 			);
 
-			Message->AddToken(FImageToken::Create(TEXT("Icons.Search")));
-			Message->AddToken(FActorSelectToken::Create(StaticMeshActor, FText::FromString(StaticMeshActor->GetActorLabel())));
-
-			if (Info.PreviousProfile != NAME_None)
+			ShadowCastingActors.Sort([](const FStaticMeshShadowInfo& Lhs, const FStaticMeshShadowInfo& Rhs)
 			{
-				Message->AddToken(
-					FTextToken::Create(
-						FText::Format(
-							LOCTEXT("DisableCollisionProfileToken", "[原碰撞预设: {0}]"),
-							FText::FromName(Info.PreviousProfile)
+				return Lhs.ActorLabel < Rhs.ActorLabel;
+			});
+
+			int32 Index = 1;
+			const int32 RankWidth = FString::FromInt(ShadowCastingActors.Num()).Len();
+
+			for (const FStaticMeshShadowInfo& Info : ShadowCastingActors)
+			{
+				AStaticMeshActor* Actor = Info.Actor.Get();
+				if (Actor)
+				{
+					const int32 CurrentIndex = Index++;
+					FString RankStr = FString::FromInt(CurrentIndex);
+					if (CurrentIndex < 10)
+					{
+						RankStr = FString::Printf(TEXT(" %s"), *RankStr);
+					}
+					RankStr = RankStr.LeftPad(RankWidth);
+
+					FString MeshTypeText;
+					if (Actor->FindComponentByClass<USkeletalMeshComponent>())
+					{
+						MeshTypeText = TEXT("骨骼网格体");
+					}
+					else if (Actor->IsA(AStaticMeshActor::StaticClass()))
+					{
+						MeshTypeText = TEXT("静态网格体");
+					}
+					else
+					{
+						MeshTypeText = TEXT("蓝图类");
+					}
+
+					constexpr int32 MeshTypeDisplayLen = 5;
+					if (MeshTypeText.Len() < MeshTypeDisplayLen)
+					{
+						MeshTypeText += FString::ChrN(MeshTypeDisplayLen - MeshTypeText.Len(), TEXT(' '));
+					}
+
+					TSharedRef<FTokenizedMessage> Message = FTokenizedMessage::Create(
+						EMessageSeverity::Info,
+						FText::FromString(FString::Printf(TEXT("#%s. [%s] "), *RankStr, *MeshTypeText))
+					);
+
+					Message->AddToken(FImageToken::Create(TEXT("Icons.Search")));
+					const FString DisplayName = EditorTools::BuildFixedDisplayName(Info.ActorLabel);
+					const FText DisplayText = FText::FromString(DisplayName);
+					Message->AddToken(FActorSelectToken::Create(Actor, DisplayText));
+
+					if (Info.bCastShadow)
+					{
+						Message->AddToken(FTextToken::Create(LOCTEXT("StaticMeshShadowCastToken", "[投射阴影: 开启]")));
+					}
+
+					Message->AddToken(FTextToken::Create(LOCTEXT("StaticMeshShadowActionHintToken", ">> 可在“详情”中视情况调整阴影设置")));
+
+					Message->AddToken(
+						FActionToken::Create(
+							LOCTEXT("StaticMeshShadowDisableAction", "[关闭阴影]"),
+							LOCTEXT("StaticMeshShadowDisableActionTooltip", "选中该Actor并关闭投射阴影"),
+							FOnActionTokenExecuted::CreateLambda(
+								[WeakActor = TWeakObjectPtr<AStaticMeshActor>(Actor), WorldContextWeak, MessageLogListingWeak]()
+							{
+#if WITH_EDITOR
+								if (GEditor)
+								{
+									GEditor->SelectNone(/*bNoteSelectionChange*/true, /*bDeselectBSPSurfs*/true, /*WarnAboutManyActors*/false);
+									if (AStaticMeshActor* ActorPtr = WeakActor.Get())
+									{
+										GEditor->SelectActor(ActorPtr, /*bInSelected*/true, /*bNotify*/true);
+									}
+								}
+
+								TArray<TWeakObjectPtr<AStaticMeshActor>> ActorsToDisable;
+								ActorsToDisable.Add(WeakActor);
+								TArray<FDisableShadowActorRecord> DisabledRecords;
+								if (!DisableShadowCastingForActors(ActorsToDisable, DisabledRecords))
+								{
+									UEditorToolsUtilities::LogWarningToMessageLogAndOpen(
+										LOCTEXT("DisableShadowInlineFailed", "该静态网格体的阴影已经处于关闭状态。")
+									);
+									return;
+								}
+
+								if (UObject* ContextObj = WorldContextWeak.Get())
+								{
+									UEditorToolsBPFLibrary::GetAllStaticMeshActorsWithShadowCasting(ContextObj);
+								}
+
+								TSharedPtr<IMessageLogListing> Listing = MessageLogListingWeak.Pin();
+								if (!Listing.IsValid())
+								{
+									Listing = UEditorToolsUtilities::GetOrCreateMessageLogListing(true);
+								}
+								FShadowMessageLogger::LogDisableShadowMessages(Listing, DisabledRecords, DisabledRecords.Num(), false);
+#endif
+							}),
+							true
 						)
-					)
-				);
+					);
+
+					MessageLogListing->AddMessage(Message);
+				}
 			}
-
-			if (Info.bGeneratedOverlap)
-			{
-				Message->AddToken(FTextToken::Create(LOCTEXT("DisableCollisionOverlapToken", "[原重叠事件: 开启]")));
-			}
-
-			Message->AddToken(FTextToken::Create(LOCTEXT("DisableCollisionResultToken", ">> 现已设置为【无碰撞】，并关闭重叠和碰撞通知")));
-
-			MessageLogListing->AddMessage(Message);
 		}
-
-		if (ActorsToUpdate.Num() > 0)
+		else
 		{
 			MessageLogListing->AddMessage(
 				FTokenizedMessage::Create(
 					EMessageSeverity::Info,
-					LOCTEXT("DisableCollisionTips", "提示：可以在“世界概览”中使用“选择”按钮快速定位，并根据需要手动恢复原碰撞。")
+					LOCTEXT("StaticMeshShadowNone", "所有静态网格体的阴影均已关闭。")
 				)
 			);
 		}
@@ -2239,12 +2736,150 @@ void UEditorToolsBPFLibrary::DisableCollisionForSelectedStaticMeshActors()
 		UEditorToolsUtilities::OpenMessageLogPanel();
 	}
 #else
+	UE_LOG(LogTemp, Warning, TEXT("GetAllStaticMeshActorsWithShadowCasting can only be used in the editor."));
+#endif
+
+	return Result;
+}
+
+void UEditorToolsBPFLibrary::DisableCollisionForSelectedStaticMeshActors()
+{
+	
+#if WITH_EDITOR
+	if (!GEditor)
+	{
+		return;
+	}
+
+	USelection* SelectedActors = GEditor->GetSelectedActors();
+	if (!SelectedActors || SelectedActors->Num() == 0)
+	{
+		// 先清除消息日志，然后输出警告消息
+		TSharedPtr<IMessageLogListing> MessageLogListing = UEditorToolsUtilities::GetOrCreateMessageLogListing(true);
+		UEditorToolsUtilities::AddWarningMessage(
+			MessageLogListing,
+			LOCTEXT("DisableCollisionNoSelection", "请先在场景中选择至少一个静态网格体Actor，然后再执行“关闭碰撞”。")
+		);
+		UEditorToolsUtilities::OpenMessageLogPanel();
+		return;
+	}
+
+	const int32 TotalSelectedActors = SelectedActors->Num();
+
+	TArray<TWeakObjectPtr<AStaticMeshActor>> ActorsToUpdate;
+	for (FSelectionIterator It(*SelectedActors); It; ++It)
+	{
+		if (AStaticMeshActor* StaticMeshActor = Cast<AStaticMeshActor>(*It))
+		{
+			if (UStaticMeshComponent* MeshComp = StaticMeshActor->GetStaticMeshComponent())
+			{
+				if (MeshComp->GetCollisionEnabled() != ECollisionEnabled::NoCollision)
+				{
+					ActorsToUpdate.Add(StaticMeshActor);
+				}
+			}
+		}
+	}
+
+	if (ActorsToUpdate.Num() == 0)
+	{
+		UEditorToolsUtilities::LogWarningToMessageLogAndOpen(
+			LOCTEXT("DisableCollisionNoCollisionActors", "所选静态网格体的碰撞已经处于关闭状态。")
+		);
+		return;
+	}
+
+	TArray<FDisableCollisionActorRecord> DisabledRecords;
+	if (!DisableCollisionForActors(ActorsToUpdate, DisabledRecords))
+	{
+		UEditorToolsUtilities::LogWarningToMessageLogAndOpen(
+			LOCTEXT("DisableCollisionNoValidActors", "选中的静态网格体碰撞已经处于关闭状态。")
+		);
+		return;
+	}
+
+	TSharedPtr<IMessageLogListing> MessageLogListing = UEditorToolsUtilities::GetOrCreateMessageLogListing(true);
+	if (MessageLogListing.IsValid())
+	{
+		// 清空之前的消息
+		MessageLogListing->ClearMessages();
+	}
+	FCollisionMessageLogger::LogDisableCollisionMessages(MessageLogListing, DisabledRecords, TotalSelectedActors, true);
+#else
 	UE_LOG(LogTemp, Warning, TEXT("DisableCollisionForSelectedStaticMeshActors can only be used in the editor."));
 #endif
 }
 
-TArray<FTextureSizeInfo> UEditorToolsBPFLibrary::CheckTextureSizesInFolders(const TArray<FString>& FolderPaths)
+void UEditorToolsBPFLibrary::DisableShadowCastingForSelectedStaticMeshActors()
 {
+	
+#if WITH_EDITOR
+	if (!GEditor)
+	{
+		return;
+	}
+
+	USelection* SelectedActors = GEditor->GetSelectedActors();
+	if (!SelectedActors || SelectedActors->Num() == 0)
+	{
+		// 先清除消息日志，然后输出警告消息
+		TSharedPtr<IMessageLogListing> MessageLogListing = UEditorToolsUtilities::GetOrCreateMessageLogListing(true);
+		UEditorToolsUtilities::AddWarningMessage(
+			MessageLogListing,
+			LOCTEXT("DisableShadowNoSelection", "请先在场景中选择至少一个静态网格体Actor，然后再执行“关闭阴影”。")
+		);
+		UEditorToolsUtilities::OpenMessageLogPanel();
+		return;
+	}
+
+	const int32 TotalSelectedActors = SelectedActors->Num();
+
+	TArray<TWeakObjectPtr<AStaticMeshActor>> ActorsToUpdate;
+	for (FSelectionIterator It(*SelectedActors); It; ++It)
+	{
+		if (AStaticMeshActor* StaticMeshActor = Cast<AStaticMeshActor>(*It))
+		{
+			if (UStaticMeshComponent* MeshComp = StaticMeshActor->GetStaticMeshComponent())
+			{
+				if (MeshComp->CastShadow)
+				{
+					ActorsToUpdate.Add(StaticMeshActor);
+				}
+			}
+		}
+	}
+
+	if (ActorsToUpdate.Num() == 0)
+	{
+		UEditorToolsUtilities::LogWarningToMessageLogAndOpen(
+			LOCTEXT("DisableShadowNoShadowActors", "所选静态网格体的阴影已经处于关闭状态。")
+		);
+		return;
+	}
+
+	TArray<FDisableShadowActorRecord> DisabledRecords;
+	if (!DisableShadowCastingForActors(ActorsToUpdate, DisabledRecords))
+	{
+		UEditorToolsUtilities::LogWarningToMessageLogAndOpen(
+			LOCTEXT("DisableShadowNoValidActors", "选中的静态网格体阴影已经处于关闭状态。")
+		);
+		return;
+	}
+
+	TSharedPtr<IMessageLogListing> MessageLogListing = UEditorToolsUtilities::GetOrCreateMessageLogListing(true);
+	if (MessageLogListing.IsValid())
+	{
+		// 清空之前的消息
+		MessageLogListing->ClearMessages();
+	}
+	FShadowMessageLogger::LogDisableShadowMessages(MessageLogListing, DisabledRecords, TotalSelectedActors, true);
+#else
+	UE_LOG(LogTemp, Warning, TEXT("DisableShadowCastingForSelectedStaticMeshActors can only be used in the editor."));
+#endif
+}
+
+TArray<FTextureSizeInfo> UEditorToolsBPFLibrary::CheckTextureSizesInFolders(const TArray<FString>& FolderPaths)
+		{
 	TArray<FTextureSizeInfo> TextureSizeInfos;
 
 #if WITH_EDITOR
@@ -2377,13 +3012,8 @@ TArray<FTextureSizeInfo> UEditorToolsBPFLibrary::CheckTextureSizesInFolders(cons
 	// 添加详细列表
 	if (TextureSizeInfos.Num() > 0)
 	{
-		// 计算对齐信息
+		// 计算对齐信息：名称固定为11个字符
 		const int32 RankWidth = FString::FromInt(TextureSizeInfos.Num()).Len();
-		int32 MaxNameLen = 0;
-		for (const FTextureSizeInfo& InfoForWidth : TextureSizeInfos)
-		{
-			MaxNameLen = FMath::Max(MaxNameLen, InfoForWidth.TextureName.Len());
-		}
 
 		MessageLogListing->AddMessage(
 			FTokenizedMessage::Create(
@@ -2415,24 +3045,18 @@ TArray<FTextureSizeInfo> UEditorToolsBPFLibrary::CheckTextureSizesInFolders(cons
 				FText::FromString(FString::Printf(TEXT("#%s. [贴图] "), *RankStr))
 			);
 
-			// 添加可点击的贴图链接（名称左对齐，右填充到最大宽度）
-			FString PaddedName = Info.TextureName;
-			if (PaddedName.Len() < MaxNameLen)
-			{
-				PaddedName += FString::ChrN(MaxNameLen - PaddedName.Len(), TEXT(' '));
-			}
+			const FString DisplayName = EditorTools::BuildFixedDisplayName(Info.TextureName);
+			const FText DisplayText = FText::FromString(DisplayName);
 
 			if (Info.TextureObject)
 			{
-				// 手动添加放大镜图标以保持一致性
 				Message->AddToken(FImageToken::Create(TEXT("Icons.Search")));
-				Message->AddToken(FAssetObjectToken::Create(Info.TextureObject, FText::FromString(PaddedName)));
+				Message->AddToken(FAssetObjectToken::Create(Info.TextureObject, DisplayText));
 		}
 			else
 			{
-				// 如果无法加载贴图，使用文本显示
 				Message->AddToken(FImageToken::Create(TEXT("Icons.Search")));
-				Message->AddToken(FTextToken::Create(FText::FromString(PaddedName)));
+				Message->AddToken(FTextToken::Create(DisplayText));
 			}
 
 			// 添加分辨率信息（用[]框起来）
@@ -2462,6 +3086,300 @@ TArray<FTextureSizeInfo> UEditorToolsBPFLibrary::CheckTextureSizesInFolders(cons
 #endif
 
 	return TextureSizeInfos;
+}
+
+TArray<FActorDrawCallInfo> UEditorToolsBPFLibrary::GetVisibleActorsDrawCallStats(UObject* WorldContextObject)
+{
+	TArray<FActorDrawCallInfo> Results;
+
+#if WITH_EDITOR
+	// 1. 获取World (Robust)
+	UWorld* World = nullptr;
+	if (WorldContextObject)
+	{
+		World = WorldContextObject->GetWorld();
+	}
+	if (!World && GEditor)
+	{
+		World = GEditor->GetEditorWorldContext().World();
+	}
+
+	if (!World)
+	{
+		UE_LOG(LogEditorTools, Error, TEXT("DrawCallStats: Failed to get valid World context."));
+		return Results;
+	}
+
+	UE_LOG(LogEditorTools, Log, TEXT("DrawCallStats: Analyzing World: %s"), *World->GetName());
+
+	// 2. 收集待分析的Actor
+	// 策略：如果用户选择了Actor，则只分析选中的；否则分析场景中所有可见的Actor。
+	TArray<AActor*> VisibleActors;
+	bool bUseSelection = false;
+
+	if (GEditor && GEditor->GetSelectedActors()->Num() > 0)
+	{
+		// 优先使用当前选中的Actor
+		for (FSelectionIterator It(*GEditor->GetSelectedActors()); It; ++It)
+		{
+			AActor* Actor = Cast<AActor>(*It);
+			if (IsValid(Actor))
+			{
+				VisibleActors.Add(Actor);
+			}
+		}
+		bUseSelection = true;
+		UE_LOG(LogEditorTools, Log, TEXT("DrawCallStats: Analyzing %d Selected Actors."), VisibleActors.Num());
+	}
+	else
+	{
+		// 如果没有选中，则分析所有可见Actor
+		for (TActorIterator<AActor> It(World); It; ++It)
+		{
+			AActor* Actor = *It;
+			if (IsValid(Actor) && !Actor->IsHidden() && !Actor->IsHiddenEd())
+			{
+				VisibleActors.Add(Actor);
+			}
+		}
+		UE_LOG(LogEditorTools, Log, TEXT("DrawCallStats: Analyzing All Visible Actors (%d found)."), VisibleActors.Num());
+	}
+
+	if (VisibleActors.Num() == 0)
+	{
+		UE_LOG(LogEditorTools, Warning, TEXT("DrawCallStats: No valid actors found to analyze."));
+		return Results;
+	}
+
+	Results.Reserve(VisibleActors.Num());
+
+	// 3. 准备环境：关闭遮挡剔除
+	static const auto CVarAllowOcclusionCulling = IConsoleManager::Get().FindConsoleVariable(TEXT("r.AllowOcclusionCulling"));
+	const int32 OldAllowOcclusionCulling = CVarAllowOcclusionCulling ? CVarAllowOcclusionCulling->GetInt() : 1;
+
+	if (CVarAllowOcclusionCulling)
+	{
+		CVarAllowOcclusionCulling->Set(0, ECVF_SetByCode);
+	}
+
+	// 强制重绘
+	if (GEditor) GEditor->RedrawAllViewports();
+	FlushRenderingCommands();
+
+	// 4. 逐个分析Actor (Hybrid: Ablation + Estimation)
+	FScopedSlowTask SlowTask(VisibleActors.Num(), LOCTEXT("CalculatingDrawCalls", "正在计算Actor Draw Calls... (这可能需要一些时间)"));
+	SlowTask.MakeDialog();
+
+	for (AActor* Actor : VisibleActors)
+	{
+		SlowTask.EnterProgressFrame(1.f, FText::FromString(FString::Printf(TEXT("分析: %s"), *Actor->GetActorLabel())));
+
+		if (!IsValid(Actor)) continue;
+
+		// --- 估算部分 (Estimation) ---
+		// 统计组件和材质槽作为保底值
+		int32 ActiveComponentCount = 0;
+		int32 TotalMaterialSlots = 0;
+		TInlineComponentArray<UPrimitiveComponent*> PrimitiveComponents(Actor);
+		for (UPrimitiveComponent* PrimComp : PrimitiveComponents)
+		{
+			if (PrimComp && PrimComp->IsRegistered() && PrimComp->IsVisible() && !PrimComp->bHiddenInGame)
+			{
+				ActiveComponentCount++;
+				TotalMaterialSlots += PrimComp->GetNumMaterials();
+			}
+		}
+
+		// --- 测量部分 (Ablation) ---
+		int32 AblationDrawCalls = 0;
+		
+		// 步骤 A: 测量 "可见" 状态
+		bool bOriginalHidden = Actor->IsHidden();
+		Actor->SetActorHiddenInGame(false);
+		Actor->SetIsTemporarilyHiddenInEditor(false);
+
+		if (GEditor) GEditor->RedrawAllViewports();
+		FlushRenderingCommands();
+		const uint32 VisibleDrawCalls = *GNumDrawCallsRHI;
+
+		// 步骤 B: 测量 "隐藏" 状态
+		Actor->SetActorHiddenInGame(true);
+		Actor->SetIsTemporarilyHiddenInEditor(true);
+
+		if (GEditor) GEditor->RedrawAllViewports();
+		FlushRenderingCommands();
+		const uint32 HiddenDrawCalls = *GNumDrawCallsRHI;
+
+		// 步骤 C: 恢复状态
+		Actor->SetActorHiddenInGame(bOriginalHidden);
+		Actor->SetIsTemporarilyHiddenInEditor(false);
+
+		AblationDrawCalls = (int32)VisibleDrawCalls - (int32)HiddenDrawCalls;
+
+		// --- 混合结果 (Hybrid) ---
+		// 如果Ablation失败(<=0)，使用材质数量作为保底估计
+		// 即使Ablation成功，如果它小于材质数(不太可能，除非被完全遮挡且我们没关掉遮挡剔除)，也取最大值比较安全
+		int32 FinalDrawCalls = FMath::Max(AblationDrawCalls, TotalMaterialSlots);
+		
+		// 只有在真的有东西画的时候才记录
+		if (FinalDrawCalls > 0)
+		{
+			FActorDrawCallInfo& Info = Results.AddDefaulted_GetRef();
+			Info.Actor = Actor;
+			Info.ActorName = Actor->GetActorLabel();
+			Info.ActorClass = Actor->GetClass()->GetName();
+			Info.ActorLocation = Actor->GetActorLocation();
+			Info.MeshTypeText = BuildMeshTypeLabel(Actor);
+			Info.TotalDrawCalls = FinalDrawCalls;
+			Info.LOD0DrawCalls = FinalDrawCalls; 
+			Info.ComponentCount = ActiveComponentCount;
+			Info.TotalMaterialSlots = TotalMaterialSlots;
+
+			// 详细日志用于调试
+			UE_LOG(LogEditorTools, Verbose, TEXT("Actor: %s | Ablation: %d | Materials: %d | Final: %d"), 
+				*Info.ActorName, AblationDrawCalls, TotalMaterialSlots, FinalDrawCalls);
+		}
+	}
+
+	// 5. 恢复环境
+	if (CVarAllowOcclusionCulling)
+	{
+		CVarAllowOcclusionCulling->Set(OldAllowOcclusionCulling, ECVF_SetByCode);
+	}
+
+	// 恢复场景状态
+	if (GEditor) GEditor->RedrawAllViewports();
+	FlushRenderingCommands();
+
+	// 排序
+	Results.Sort([](const FActorDrawCallInfo& Lhs, const FActorDrawCallInfo& Rhs)
+	{
+		return Lhs.TotalDrawCalls > Rhs.TotalDrawCalls;
+	});
+
+	// ==================== 消息日志输出 ====================
+	
+	FMessageLogModule& MessageLogModule = FModuleManager::LoadModuleChecked<FMessageLogModule>("MessageLog");
+	TSharedPtr<IMessageLogListing> MessageLogListing = MessageLogModule.GetLogListing(FEditorToolsMessageLog::MessageLogName);
+	
+	if (!MessageLogListing.IsValid())
+	{
+		FEditorToolsMessageLog::Initialize();
+		MessageLogListing = MessageLogModule.GetLogListing(FEditorToolsMessageLog::MessageLogName);
+	}
+
+	if (MessageLogListing.IsValid())
+	{
+		MessageLogListing->ClearMessages();
+
+		// 标题
+		MessageLogListing->AddMessage(
+			FTokenizedMessage::Create(
+				EMessageSeverity::Info,
+				LOCTEXT("DrawCallStatsHeader", "------------------ 场景Draw Call统计 (Hybrid Method) ------------------")
+			)
+		);
+
+		// 统计概览
+		int32 TotalEstimatedDrawCalls = 0;
+		for (const FActorDrawCallInfo& Info : Results)
+		{
+			TotalEstimatedDrawCalls += Info.TotalDrawCalls;
+		}
+
+		MessageLogListing->AddMessage(
+			FTokenizedMessage::Create(
+				EMessageSeverity::Info,
+				FText::Format(LOCTEXT("DrawCallStatsSummary", "检查了 {0} 个可见Actor，累计贡献约 {1} 个Draw Call"), 
+					FText::AsNumber(Results.Num()),
+					FText::AsNumber(TotalEstimatedDrawCalls))
+			)
+		);
+
+		int32 SeparatorLen = 80;
+		FString FooterSeparator = FString::ChrN(SeparatorLen, TEXT('-'));
+
+		if (Results.Num() > 0)
+		{
+			const int32 RankWidth = FString::FromInt(Results.Num()).Len();
+			SeparatorLen = FMath::Clamp(RankWidth + 15 + 50, 60, 120);
+			FooterSeparator = FString::ChrN(SeparatorLen, TEXT('-'));
+
+			MessageLogListing->AddMessage(
+				FTokenizedMessage::Create(
+					EMessageSeverity::Warning,
+					LOCTEXT("DrawCallListHeader", "详细Actor列表（按Draw Call贡献从高到低，点击可定位）：")
+				)
+			);
+
+			// 输出前100个或者全部
+			const int32 MaxOutputCount = 100; 
+			int32 OutputCount = 0;
+
+			for (int32 Rank = 0; Rank < Results.Num(); ++Rank)
+			{
+				if (OutputCount >= MaxOutputCount) break;
+
+				const FActorDrawCallInfo& Info = Results[Rank];
+				
+				OutputCount++;
+
+				// 构建详细信息字符串
+				FString DetailText = FString::Printf(TEXT("DrawCall: %d | 材质槽: %d | 组件: %d | 类型: %s"), 
+					Info.TotalDrawCalls,
+					Info.TotalMaterialSlots,
+					Info.ComponentCount,
+					*Info.MeshTypeText);
+
+				// 严重程度
+				EMessageSeverity::Type Severity = (Info.TotalDrawCalls >= 10) 
+					? EMessageSeverity::Warning 
+					: EMessageSeverity::Info;
+
+				// 序号
+				FString RankStr = FString::FromInt(Rank + 1);
+				if (RankStr.Len() == 1) RankStr = FString::Printf(TEXT(" %s"), *RankStr);
+				RankStr = RankStr.LeftPad(RankWidth);
+
+				TSharedRef<FTokenizedMessage> Message = FTokenizedMessage::Create(
+					Severity,
+					FText::FromString(FString::Printf(TEXT("#%s. "), *RankStr))
+				);
+
+				const FString DisplayName = EditorTools::BuildFixedDisplayName(Info.ActorName);
+				const FText DisplayText = FText::FromString(DisplayName);
+				
+				if (Info.Actor)
+				{
+					Message->AddToken(FImageToken::Create(TEXT("Icons.Search")));
+					Message->AddToken(FActorSelectToken::Create(
+						Info.Actor,
+						DisplayText
+					));
+				}
+				else
+				{
+					Message->AddToken(FTextToken::Create(DisplayText));
+				}
+
+				Message->AddToken(FTextToken::Create(FText::FromString(FString::Printf(TEXT(" %s"), *DetailText))));
+
+				MessageLogListing->AddMessage(Message);
+			}
+		}
+
+		MessageLogListing->AddMessage(
+			FTokenizedMessage::Create(
+				EMessageSeverity::Info,
+				FText::FromString(FooterSeparator)
+			)
+		);
+
+		MessageLogModule.OpenMessageLog(FEditorToolsMessageLog::MessageLogName);
+	}
+#endif
+
+	return Results;
 }
 
 #undef LOCTEXT_NAMESPACE

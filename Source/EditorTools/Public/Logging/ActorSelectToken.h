@@ -14,7 +14,7 @@ public:
 	/**
 	 * 创建一个可点击的 Actor 选择 Token
 	 * @param Actor 要选择的 Actor
-	 * @param DisplayText 显示的文本
+	 * @param DisplayText 显示的文本（已处理对齐/截断）
 	 */
 	static TSharedRef<FActorSelectToken> Create(AActor* Actor, const FText& DisplayText);
 

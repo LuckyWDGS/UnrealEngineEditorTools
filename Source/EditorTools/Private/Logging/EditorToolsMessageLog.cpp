@@ -12,6 +12,7 @@
 #include "Misc/UObjectToken.h"
 #include "Logging/TokenizedMessage.h"
 #include "Logging/AssetObjectToken.h"
+#include "Logging/DisplayNameUtils.h"
 #include "UObject/SoftObjectPath.h"
 #include "GameFramework/Actor.h"
 #include "Editor.h"
@@ -100,13 +101,8 @@ void FEditorToolsMessageLog::ShowUnusedAssetsReport(
 	// 添加未使用资产列表
 	if (UnusedAssets.Num() > 0)
 	{
-		// 计算对齐信息
+		// 计算对齐信息：名称固定为11个字符
 		const int32 RankWidth = FString::FromInt(UnusedAssets.Num()).Len();
-		int32 MaxNameLen = 0;
-		for (const FUnusedAssetInfo& InfoForWidth : UnusedAssets)
-		{
-			MaxNameLen = FMath::Max(MaxNameLen, InfoForWidth.AssetName.Len());
-		}
 
 		MessageLogListing->AddMessage(
 			FTokenizedMessage::Create(
@@ -152,24 +148,19 @@ void FEditorToolsMessageLog::ShowUnusedAssetsReport(
 				FText::FromString(FString::Printf(TEXT("#%s. [%s] "), *RankStr, *AssetType))
 			);
 
-			// 添加可点击的资产链接（名称左对齐，右填充到最大宽度）
-			FString PaddedName = Info.AssetName;
-			if (PaddedName.Len() < MaxNameLen)
-			{
-				PaddedName += FString::ChrN(MaxNameLen - PaddedName.Len(), TEXT(' '));
-			}
+			const FString DisplayName = EditorTools::BuildFixedDisplayName(Info.AssetName);
+			const FText DisplayText = FText::FromString(DisplayName);
 			if (AssetObject)
 			{
 				// 手动添加放大镜图标以保持与 GetHighPolyActorsInScene 的一致性
-				// 使用自定义的 FAssetObjectToken，不自动显示放大镜图标
 				Message->AddToken(FImageToken::Create(TEXT("Icons.Search")));
-				Message->AddToken(FAssetObjectToken::Create(AssetObject, FText::FromString(PaddedName)));
+				Message->AddToken(FAssetObjectToken::Create(AssetObject, DisplayText));
 			}
 			else
 			{
 				// 如果无法加载资产，使用文本显示，需要手动添加放大镜图标
 				Message->AddToken(FImageToken::Create(TEXT("Icons.Search")));
-				Message->AddToken(FTextToken::Create(FText::FromString(PaddedName)));
+				Message->AddToken(FTextToken::Create(DisplayText));
 			}
 			
 			// 添加路径信息
@@ -184,14 +175,9 @@ void FEditorToolsMessageLog::ShowUnusedAssetsReport(
 	FString FooterSeparator;
 	if (UnusedAssets.Num() > 0)
 	{
-		// 如果有未使用的资产，根据列表宽度计算分隔线长度
+		// 如果有未使用的资产，根据列表宽度计算分隔线长度（名称固定为11个字符）
 		const int32 RankWidth = FString::FromInt(UnusedAssets.Num()).Len();
-		int32 MaxNameLen = 0;
-		for (const FUnusedAssetInfo& InfoForWidth : UnusedAssets)
-		{
-			MaxNameLen = FMath::Max(MaxNameLen, InfoForWidth.AssetName.Len());
-		}
-		SeparatorLen = FMath::Clamp(RankWidth + MaxNameLen + 50, 60, 120);
+		SeparatorLen = FMath::Clamp(RankWidth + 11 + 50, 60, 120);
 	}
 	FooterSeparator = FString::ChrN(SeparatorLen, TEXT('-'));
 	

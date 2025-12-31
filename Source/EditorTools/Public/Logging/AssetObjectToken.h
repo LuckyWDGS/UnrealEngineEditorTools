@@ -14,7 +14,7 @@ public:
 	/**
 	 * 创建一个可点击的资产对象 Token
 	 * @param Object 要定位的 UObject
-	 * @param DisplayText 显示的文本
+	 * @param DisplayText 显示的文本（已处理对齐/截断）
 	 */
 	static TSharedRef<FAssetObjectToken> Create(UObject* Object, const FText& DisplayText);
 

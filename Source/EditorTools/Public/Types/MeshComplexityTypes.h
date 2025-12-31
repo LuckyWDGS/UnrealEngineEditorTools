@@ -106,4 +106,52 @@ struct EDITORTOOLS_API FActorMeshComplexityInfo
 	}
 };
 
+/**
+ * Actor材质插槽信息结构体
+ */
+USTRUCT(BlueprintType)
+struct EDITORTOOLS_API FActorMaterialSlotInfo
+{
+	GENERATED_BODY()
+
+	// Actor引用
+	UPROPERTY(BlueprintReadOnly, Category = "Material Slot")
+	AActor* Actor;
+
+	// Actor名称（关卡大纲中的名称）
+	UPROPERTY(BlueprintReadOnly, Category = "Material Slot")
+	FString ActorName;
+
+	// Actor类型
+	UPROPERTY(BlueprintReadOnly, Category = "Material Slot")
+	FString ActorClass;
+
+	// Actor位置
+	UPROPERTY(BlueprintReadOnly, Category = "Material Slot")
+	FVector ActorLocation;
+
+	// 网格体类型
+	UPROPERTY(BlueprintReadOnly, Category = "Material Slot")
+	EMeshType MeshType;
+
+	// 材质插槽数量
+	UPROPERTY(BlueprintReadOnly, Category = "Material Slot")
+	int32 MaterialSlotCount;
+
+	// 组件数量
+	UPROPERTY(BlueprintReadOnly, Category = "Material Slot")
+	int32 ComponentCount;
+
+	FActorMaterialSlotInfo()
+		: Actor(nullptr)
+		, ActorName(TEXT(""))
+		, ActorClass(TEXT(""))
+		, ActorLocation(FVector::ZeroVector)
+		, MeshType(EMeshType::StaticMesh)
+		, MaterialSlotCount(0)
+		, ComponentCount(0)
+	{
+	}
+};
+
 
